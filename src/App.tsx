@@ -15,6 +15,10 @@ type SelectionMode = 'single' | 'box' | 'lasso'
 type SceneView = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'perspective'
 type ShortcutAction = 'focus' | 'rename' | 'link' | 'linkContinuous' | 'duplicate' | 'encapsulate' | 'edgeSource' | 'edgeTarget' | 'fullscreen' | 'save' | 'search' | 'undo' | 'redo' | 'remove' | 'selectSingle' | 'gizmoMove' | 'gizmoScale' | 'selectBox' | 'selectLasso' | 'forward' | 'backward' | 'left' | 'right' | 'up' | 'down'
 type ShortcutMap = Record<ShortcutAction, string>
+function projectDeviceKey(name: string): string {
+  const projectId = localStorage.getItem('wordverse.activeProjectId') || 'legacy-default'
+  return `wordverse.project.${projectId}.${name}`
+}
 
 const DEFAULT_SHORTCUTS: ShortcutMap = { focus: 'KeyF', rename: 'F2', link: 'KeyL', linkContinuous: 'Shift+KeyL', duplicate: 'Alt+KeyD', encapsulate: 'Shift+KeyC', edgeSource: 'Shift+Comma', edgeTarget: 'Shift+Period', fullscreen: 'Space', save: 'Ctrl+KeyS', search: 'Ctrl+KeyK', undo: 'Ctrl+KeyZ', redo: 'Ctrl+Shift+KeyZ', remove: 'Delete', selectSingle: 'KeyR', gizmoMove: 'KeyT', gizmoScale: 'KeyY', selectBox: 'KeyB', selectLasso: 'KeyC', forward: 'Mouse0+KeyW', backward: 'Mouse0+KeyS', left: 'Mouse0+KeyA', right: 'Mouse0+KeyD', up: 'Mouse0+KeyE', down: 'Mouse0+KeyQ' }
 const SHORTCUT_LABELS: { action: ShortcutAction; label: string }[] = [
@@ -24,7 +28,7 @@ type CameraSnapshot = { position: [number, number, number]; target: [number, num
 
 function loadCameraSnapshots(): Map<string, CameraSnapshot> {
   try {
-    const parsed = JSON.parse(localStorage.getItem('wordverse.cameraSnapshots') || '{}') as Record<string, CameraSnapshot>
+    const parsed = JSON.parse(localStorage.getItem(projectDeviceKey('cameraSnapshots')) || '{}') as Record<string, CameraSnapshot>
     return new Map(Object.entries(parsed).filter(([, value]) =>
       value && [...value.position, ...value.target, ...value.up].every(Number.isFinite)
     ))
@@ -36,7 +40,7 @@ const cameraSnapshots = loadCameraSnapshots()
 function saveCameraSnapshot(graphId: string, camera: { position: Vector3; up: Vector3 }, target: Vector3) {
   const snapshot: CameraSnapshot = { position: camera.position.toArray() as [number, number, number], target: target.toArray() as [number, number, number], up: camera.up.toArray() as [number, number, number] }
   cameraSnapshots.set(graphId, snapshot)
-  localStorage.setItem('wordverse.cameraSnapshots', JSON.stringify(Object.fromEntries(cameraSnapshots)))
+  localStorage.setItem(projectDeviceKey('cameraSnapshots'), JSON.stringify(Object.fromEntries(cameraSnapshots)))
 }
 
 function shortcutForEvent(event: KeyboardEvent | React.KeyboardEvent): string {
@@ -280,7 +284,7 @@ function formatExactTime(value?: string): string {
 
 function loadStoredTabs(graphs: Record<string, Graph>): { tabs: { id: string; path: string[] }[]; activeId: string } {
   try {
-    const parsed = JSON.parse(localStorage.getItem('wordverse.tabs') || 'null') as { tabs?: { id?: unknown; path?: unknown }[]; activeId?: unknown } | null
+    const parsed = JSON.parse(localStorage.getItem(projectDeviceKey('tabs')) || 'null') as { tabs?: { id?: unknown; path?: unknown }[]; activeId?: unknown } | null
     const tabs = (parsed?.tabs || []).filter(tab => typeof tab.id === 'string' && Array.isArray(tab.path)).map(tab => ({ id: tab.id as string, path: (tab.path as unknown[]).filter((id): id is string => typeof id === 'string' && !!graphs[id]) })).filter(tab => tab.path.length > 0)
     if (tabs.length) return { tabs, activeId: tabs.some(tab => tab.id === parsed?.activeId) ? parsed!.activeId as string : tabs[0].id }
   } catch { /* use the default scene tab */ }
@@ -291,7 +295,7 @@ function loadStoredSelection(graphId: string, graphs: Record<string, Graph>): { 
   const graph = graphs[graphId]
   if (!graph) return { primary: '', ids: new Set() }
   try {
-    const stored = JSON.parse(localStorage.getItem('wordverse.selections') || '{}') as Record<string, { primary?: unknown; ids?: unknown }>
+    const stored = JSON.parse(localStorage.getItem(projectDeviceKey('selections')) || '{}') as Record<string, { primary?: unknown; ids?: unknown }>
     const entry = stored[graphId]
     const ids = new Set((Array.isArray(entry?.ids) ? entry.ids : []).filter((id): id is string => typeof id === 'string' && graph.nodes.some(node => node.id === id)))
     const primary = typeof entry?.primary === 'string' && graph.nodes.some(node => node.id === entry.primary) ? entry.primary : [...ids][0] || graph.nodes[0]?.id || ''
@@ -774,7 +778,7 @@ function GraphScene({ graph, selectedId, selectedIds, selectionMode, gizmoMode, 
   </>
 }
 
-export default function App() {
+export default function App({ projectName, onRequestProjectManager }: { projectName?: string; onRequestProjectManager?: () => void } = {}) {
   const reduceMotion = useReducedMotion()
   const [graphs, setGraphs] = useState<Record<string, Graph>>(loadStoredGraphs)
   const restoredTabs = useMemo(() => loadStoredTabs(graphs), [])
@@ -799,11 +803,11 @@ export default function App() {
   const [renameGraphRequest, setRenameGraphRequest] = useState<{ graphId: string; name: string } | null>(null)
   const [deleteGraphRequest, setDeleteGraphRequest] = useState<string | null>(null)
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem('wordverse.expandedNodes') || '[]')) }
+    try { return new Set(JSON.parse(localStorage.getItem(projectDeviceKey('expandedNodes')) || '[]')) }
     catch { return new Set() }
   })
-  const [hierarchyRootExpanded, setHierarchyRootExpanded] = useState(() => localStorage.getItem('wordverse.hierarchyRootExpanded') !== 'false')
-  const [browserRootExpanded, setBrowserRootExpanded] = useState(() => localStorage.getItem('wordverse.browserRootExpanded') !== 'false')
+  const [hierarchyRootExpanded, setHierarchyRootExpanded] = useState(() => localStorage.getItem(projectDeviceKey('hierarchyRootExpanded')) !== 'false')
+  const [browserRootExpanded, setBrowserRootExpanded] = useState(() => localStorage.getItem(projectDeviceKey('browserRootExpanded')) !== 'false')
   const [dark, setDark] = useState(() => localStorage.getItem('wordverse.theme') === 'dark')
   const [editingId, setEditingId] = useState('')
   const [draftGraphName, setDraftGraphName] = useState<string | null>(null)
@@ -1007,9 +1011,9 @@ export default function App() {
   useEffect(() => localStorage.setItem('wordverse.gridClarity', String(gridClarity)), [gridClarity])
   useEffect(() => localStorage.setItem('wordverse.gridRange', String(gridRange)), [gridRange])
   useEffect(() => localStorage.setItem('wordverse.motion', String(motionEnabled)), [motionEnabled])
-  useEffect(() => localStorage.setItem('wordverse.hierarchyRootExpanded', String(hierarchyRootExpanded)), [hierarchyRootExpanded])
-  useEffect(() => localStorage.setItem('wordverse.browserRootExpanded', String(browserRootExpanded)), [browserRootExpanded])
-  useEffect(() => localStorage.setItem('wordverse.expandedNodes', JSON.stringify([...expandedNodes])), [expandedNodes])
+  useEffect(() => localStorage.setItem(projectDeviceKey('hierarchyRootExpanded'), String(hierarchyRootExpanded)), [hierarchyRootExpanded])
+  useEffect(() => localStorage.setItem(projectDeviceKey('browserRootExpanded'), String(browserRootExpanded)), [browserRootExpanded])
+  useEffect(() => localStorage.setItem(projectDeviceKey('expandedNodes'), JSON.stringify([...expandedNodes])), [expandedNodes])
   useEffect(() => localStorage.setItem('wordverse.sceneFullscreen', String(sceneFullscreen)), [sceneFullscreen])
   useEffect(() => localStorage.setItem('wordverse.consoleOpen', String(consoleOpen)), [consoleOpen])
   useEffect(() => localStorage.setItem('wordverse.motionSpeed', String(motionSpeed)), [motionSpeed])
@@ -1030,16 +1034,16 @@ export default function App() {
     addEventListener('pointermove', move); addEventListener('pointerup', stop)
     return () => { removeEventListener('pointermove', move); removeEventListener('pointerup', stop) }
   }, [resizingPanel])
-  useEffect(() => localStorage.setItem('wordverse.tabs', JSON.stringify({ tabs, activeId: activeTabId })), [tabs, activeTabId])
+  useEffect(() => localStorage.setItem(projectDeviceKey('tabs'), JSON.stringify({ tabs, activeId: activeTabId })), [tabs, activeTabId])
   useEffect(() => {
     if (!storageReady) return
     const validIds = [...selectedIds].filter(id => graph.nodes.some(node => node.id === id))
     const validPrimary = graph.nodes.some(node => node.id === selectedId) ? selectedId : validIds[0] || ''
     try {
-      const stored = JSON.parse(localStorage.getItem('wordverse.selections') || '{}') as Record<string, { primary: string; ids: string[] }>
+      const stored = JSON.parse(localStorage.getItem(projectDeviceKey('selections')) || '{}') as Record<string, { primary: string; ids: string[] }>
       stored[graph.id] = { primary: validPrimary, ids: validIds }
-      localStorage.setItem('wordverse.selections', JSON.stringify(stored))
-    } catch { localStorage.setItem('wordverse.selections', JSON.stringify({ [graph.id]: { primary: validPrimary, ids: validIds } })) }
+      localStorage.setItem(projectDeviceKey('selections'), JSON.stringify(stored))
+    } catch { localStorage.setItem(projectDeviceKey('selections'), JSON.stringify({ [graph.id]: { primary: validPrimary, ids: validIds } })) }
   }, [storageReady, graph.id, graph.nodes, selectedId, selectedIds])
   const navigateBack = () => {
     if (path.length <= 1) return
@@ -1446,10 +1450,17 @@ export default function App() {
     setLockedView(nextLock)
     setViewRequest({ view, nonce: Date.now(), locked: !!nextLock })
   }
+  const requestProjectManager = async () => {
+    if (!onRequestProjectManager) return
+    saveImmediately()
+    await saveQueue.current.catch(() => undefined)
+    if (!lastSaveSucceeded.current) { setCloseProblem('save-error'); return }
+    onRequestProjectManager()
+  }
   return <div className={`${dark ? 'app dark' : 'app'} font-${fontStyle}${sceneFullscreen ? ' scene-fullscreen' : ''}${resizingPanel ? ' resizing-panels' : ''}`} style={{ '--left-panel': `${leftPanelWidth}px`, '--right-panel': `${rightPanelWidth}px` } as React.CSSProperties}>
     {storageConflict && <div className="storage-conflict"><div><strong>检测到词库同步冲突</strong><span>磁盘文件已被其他设备或程序修改。你的当前内容尚未覆盖它。</span></div><button disabled={backupBusy} onClick={() => loadExternalWorkspace(false)}>载入磁盘版本</button><button className="primary" disabled={backupBusy} onClick={() => loadExternalWorkspace(true)}>保留我的副本并载入</button></div>}
     <header className="titlebar">
-      <button className="logo" aria-label="回到主页" onClick={() => { setPath([path[0]]); setSelectedId(''); cancelActiveMode() }}><Sparkles size={17}/><span>Wordverse</span></button>
+      <div className="brand-project"><button className="logo" aria-label="回到主页" onClick={() => { setPath([path[0]]); setSelectedId(''); cancelActiveMode() }}><Sparkles size={17}/><span>Wordverse</span></button>{projectName && <button className="project-switch" title="切换项目" onClick={() => void requestProjectManager()}><Folder size={13}/><span>{projectName}</span><ChevronDown size={11}/></button>}</div>
       <nav className="tabs">{tabs.map(tab => {
         const active = tab.id === activeTabId
         const label = tab.path.map(id => graphs[id]?.name || (id === 'root' ? '主词网' : id)).join(' > ')

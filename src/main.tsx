@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
+import ProjectShell from './ProjectShell'
 import AppErrorBoundary from './AppErrorBoundary'
 import './styles.css'
 
-createRoot(document.getElementById('root')!).render(<StrictMode><AppErrorBoundary><App /></AppErrorBoundary></StrictMode>)
+createRoot(document.getElementById('root')!).render(<StrictMode><AppErrorBoundary><ProjectShell /></AppErrorBoundary></StrictMode>)

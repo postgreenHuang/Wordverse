@@ -1,16 +1,94 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::{HashMap, HashSet}, fs, io::Write, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, fs, io::Write, path::{Path, PathBuf}, sync::{OnceLock, RwLock}, time::{SystemTime, UNIX_EPOCH}};
 
-fn wordverse_dir() -> Result<PathBuf, String> {
+const PROJECT_FORMAT_VERSION: u64 = 1;
+static ACTIVE_PROJECT_ROOT: OnceLock<RwLock<PathBuf>> = OnceLock::new();
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectManifest { project_format_version: u64, project_id: String, name: String, created_at: String, #[serde(default)] legacy_layout: bool }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectInfo { project_id: String, name: String, path: String, legacy: bool }
+
+fn default_project_dir() -> Result<PathBuf, String> {
   let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).ok_or("cannot_resolve_user_directory")?;
   Ok(PathBuf::from(home).join(".Wordverse"))
+}
+
+fn active_project_lock() -> Result<&'static RwLock<PathBuf>, String> {
+  if let Some(lock) = ACTIVE_PROJECT_ROOT.get() { return Ok(lock); }
+  let root = default_project_dir()?;
+  let _ = ACTIVE_PROJECT_ROOT.set(RwLock::new(root));
+  ACTIVE_PROJECT_ROOT.get().ok_or_else(|| "project_context_unavailable".into())
+}
+
+fn wordverse_dir() -> Result<PathBuf, String> {
+  active_project_lock()?.read().map(|root| root.clone()).map_err(|_| "project_context_poisoned".into())
+}
+
+fn iso_timestamp() -> Result<String, String> {
+  let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| format!("clock_failed: {error}"))?.as_millis();
+  Ok(millis.to_string())
+}
+
+fn manifest_path(root: &Path) -> PathBuf { root.join(".wordverse-project.json") }
+
+fn find_parent_project(root: &Path) -> bool {
+  root.parent().into_iter().flat_map(Path::ancestors).any(|parent| manifest_path(parent).is_file())
+}
+
+fn validate_legacy_project(root: &Path) -> Result<(), String> {
+  let settings = root.join("settings.json");
+  if settings.is_file() {
+    let raw = fs::read_to_string(&settings).map_err(|error| format!("settings_read_failed: {error}"))?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| format!("invalid_settings_json: {error}"))?;
+    let files = value.get("graphFiles").and_then(Value::as_object).ok_or("invalid_graph_index")?;
+    for filename in files.values().filter_map(Value::as_str) {
+      if Path::new(filename).components().count() != 1 { return Err("invalid_graph_filename".into()); }
+      let raw = fs::read_to_string(root.join("词网").join(filename)).map_err(|error| format!("graph_read_failed: {error}"))?;
+      serde_json::from_str::<Value>(&raw).map_err(|error| format!("invalid_graph_json: {error}"))?;
+    }
+    return Ok(());
+  }
+  let workspace = root.join("workspace.json");
+  let raw = fs::read_to_string(workspace).map_err(|error| format!("workspace_read_failed: {error}"))?;
+  let value: Value = serde_json::from_str(&raw).map_err(|error| format!("invalid_workspace_json: {error}"))?;
+  if value.get("schemaVersion").and_then(Value::as_u64) != Some(1) { return Err("unsupported_schema_version".into()); }
+  Ok(())
+}
+fn read_project(root: &Path) -> Result<ProjectInfo, String> {
+  if !root.is_dir() { return Err("project_directory_missing".into()); }
+  let canonical = fs::canonicalize(root).map_err(|error| format!("project_path_failed: {error}"))?;
+  let manifest_file = manifest_path(&canonical);
+  let legacy = !manifest_file.exists() && (canonical.join("settings.json").is_file() || canonical.join("workspace.json").is_file());
+  if !manifest_file.exists() && !legacy { return Err("not_wordverse_project".into()); }
+  let manifest = if legacy {
+    let stamp = iso_timestamp()?;
+    validate_legacy_project(&canonical)?;
+    let manifest = ProjectManifest { project_format_version: PROJECT_FORMAT_VERSION, project_id: format!("legacy-{stamp}"), name: canonical.file_name().and_then(|name| name.to_str()).unwrap_or("Wordverse").to_string(), created_at: stamp, legacy_layout: true };
+    write_atomic(&manifest_file, &serde_json::to_string_pretty(&manifest).map_err(|error| format!("manifest_serialize_failed: {error}"))?)?;
+    manifest
+  } else {
+    let raw = fs::read_to_string(&manifest_file).map_err(|error| format!("manifest_read_failed: {error}"))?;
+    let manifest: ProjectManifest = serde_json::from_str(&raw).map_err(|error| format!("manifest_invalid: {error}"))?;
+    if manifest.project_format_version != PROJECT_FORMAT_VERSION || manifest.project_id.trim().is_empty() || manifest.name.trim().is_empty() { return Err("manifest_invalid".into()); }
+    manifest
+  };
+  let legacy_layout = manifest.legacy_layout;
+  Ok(ProjectInfo { project_id: manifest.project_id, name: manifest.name, path: canonical.to_string_lossy().into_owned(), legacy: legacy_layout })
 }
 
 fn workspace_path() -> Result<PathBuf, String> { Ok(wordverse_dir()?.join("workspace.json")) }
 fn settings_path() -> Result<PathBuf, String> { Ok(wordverse_dir()?.join("settings.json")) }
 fn graphs_dir() -> Result<PathBuf, String> { Ok(wordverse_dir()?.join("词网")) }
-fn backups_dir() -> Result<PathBuf, String> { Ok(wordverse_dir()?.join("备份")) }
+fn backups_dir() -> Result<PathBuf, String> {
+  let root = wordverse_dir()?;
+  let legacy = fs::read_to_string(manifest_path(&root)).ok().and_then(|raw| serde_json::from_str::<ProjectManifest>(&raw).ok()).map(|manifest| manifest.legacy_layout).unwrap_or(true);
+  Ok(if legacy { root.join("备份") } else { root.join(".wordverse").join("backups") })
+}
 
 fn image_extension(bytes: &[u8]) -> Option<&'static str> {
   if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) { return Some("png"); }
@@ -244,6 +322,45 @@ fn migrate_legacy_workspace_files() -> Result<(), String> {
 struct WorkspaceBackup { id: String, revision: u64, updated_at: String }
 
 #[tauri::command]
+fn default_project() -> Result<Option<ProjectInfo>, String> {
+  let root = default_project_dir()?;
+  if !root.is_dir() { return Ok(None); }
+  match read_project(&root) { Ok(project) => Ok(Some(project)), Err(error) if error == "not_wordverse_project" => Ok(None), Err(error) => Err(error) }
+}
+
+#[tauri::command]
+fn activate_project(path: String) -> Result<ProjectInfo, String> {
+  let project = read_project(Path::new(&path))?;
+  let canonical = PathBuf::from(&project.path);
+  let lock = active_project_lock()?;
+  *lock.write().map_err(|_| "project_context_poisoned".to_string())? = canonical;
+  Ok(project)
+}
+
+#[tauri::command]
+fn create_project(path: String, name: String) -> Result<ProjectInfo, String> {
+  let name = name.trim();
+  if name.is_empty() { return Err("project_name_required".into()); }
+  let requested = PathBuf::from(path);
+  fs::create_dir_all(&requested).map_err(|error| format!("project_create_failed: {error}"))?;
+  let root = fs::canonicalize(&requested).map_err(|error| format!("project_path_failed: {error}"))?;
+  if find_parent_project(&root) { return Err("nested_project_not_allowed".into()); }
+  if manifest_path(&root).exists() || root.join("settings.json").exists() || root.join("词网").exists() { return Err("project_already_exists".into()); }
+  let mut entries = fs::read_dir(&root).map_err(|error| format!("project_read_failed: {error}"))?;
+  if entries.next().is_some() { return Err("project_directory_not_empty".into()); }
+  let stamp = iso_timestamp()?;
+  let manifest = ProjectManifest { project_format_version: PROJECT_FORMAT_VERSION, project_id: format!("project-{}-{}", std::process::id(), stamp), name: name.to_string(), created_at: stamp, legacy_layout: false };
+  write_atomic(&manifest_path(&root), &serde_json::to_string_pretty(&manifest).map_err(|error| format!("manifest_serialize_failed: {error}"))?)?;
+  fs::create_dir_all(root.join("词网")).map_err(|error| format!("graph_directory_failed: {error}"))?;
+  fs::create_dir_all(root.join("assets")).map_err(|error| format!("asset_directory_failed: {error}"))?;
+  fs::create_dir_all(root.join(".wordverse").join("backups")).map_err(|error| format!("backup_directory_failed: {error}"))?;
+  fs::create_dir_all(root.join(".wordverse").join("conflicts")).map_err(|error| format!("conflict_directory_failed: {error}"))?;
+  let project = read_project(&root)?;
+  let lock = active_project_lock()?;
+  *lock.write().map_err(|_| "project_context_poisoned".to_string())? = root;
+  Ok(project)
+}
+#[tauri::command]
 fn load_workspace() -> Result<Option<String>, String> {
   if let Some(document) = load_split_workspace()? { return Ok(Some(document)); }
   let path = workspace_path()?;
@@ -305,7 +422,9 @@ fn restore_workspace_backup(slot: u8, updated_at: String) -> Result<String, Stri
 fn save_conflict_copy(document: String) -> Result<String, String> {
   let value: Value = serde_json::from_str(&document).map_err(|error| format!("invalid_workspace_json: {error}"))?;
   if value.get("schemaVersion").and_then(Value::as_u64) != Some(1) { return Err("unsupported_schema_version".into()); }
-  let directory = wordverse_dir()?.join("conflicts");
+  let root = wordverse_dir()?;
+  let legacy = fs::read_to_string(manifest_path(&root)).ok().and_then(|raw| serde_json::from_str::<ProjectManifest>(&raw).ok()).map(|manifest| manifest.legacy_layout).unwrap_or(true);
+  let directory = if legacy { root.join("conflicts") } else { root.join(".wordverse").join("conflicts") };
   fs::create_dir_all(&directory).map_err(|error| format!("conflict_directory_failed: {error}"))?;
   let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| format!("clock_failed: {error}"))?.as_millis();
   let name = format!("workspace-conflict-{stamp}.json");
@@ -349,7 +468,8 @@ fn import_workspace_document(document: String) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![load_workspace, save_workspace, list_workspace_backups, restore_workspace_backup, save_conflict_copy, save_image_asset, resolve_image_asset, export_workspace_document, import_workspace_document])
+    .plugin(tauri_plugin_dialog::init())
+    .invoke_handler(tauri::generate_handler![default_project, activate_project, create_project, load_workspace, save_workspace, list_workspace_backups, restore_workspace_backup, save_conflict_copy, save_image_asset, resolve_image_asset, export_workspace_document, import_workspace_document])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

@@ -272,11 +272,12 @@ export async function storeImageAsset(file: File): Promise<string> {
 const resolvedAssets = new Map<string, string>()
 export async function resolveImageAsset(value: string): Promise<string> {
   if (!value.startsWith('asset:') || !isTauri) return value
-  const cached = resolvedAssets.get(value)
+  const cacheKey = `${localStorage.getItem('wordverse.activeProjectId') || 'legacy-default'}:${value}`
+  const cached = resolvedAssets.get(cacheKey)
   if (cached) return cached
   const path = await invoke<string>('resolve_image_asset', { reference: value })
   const source = convertFileSrc(path)
-  resolvedAssets.set(value, source)
+  resolvedAssets.set(cacheKey, source)
   return source
 }
 
