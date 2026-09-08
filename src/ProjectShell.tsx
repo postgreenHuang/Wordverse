@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import { FolderOpen, Plus, Sparkles, X } from 'lucide-react'
+import { ArrowLeft, FolderOpen, Plus, Sparkles, X } from 'lucide-react'
 import App from './App'
 
 export type ProjectInfo = { projectId: string; name: string; path: string; legacy: boolean }
@@ -24,6 +24,7 @@ export default function ProjectShell() {
   const desktop = '__TAURI_INTERNALS__' in window
   const dark = localStorage.getItem('wordverse.theme') === 'dark'
   const [active, setActive] = useState<ProjectInfo | null>(null)
+  const [returnProject, setReturnProject] = useState<ProjectInfo | null>(null)
   const [recents, setRecents] = useState(storedRecents)
   const [loading, setLoading] = useState(desktop)
   const [error, setError] = useState('')
@@ -48,8 +49,19 @@ export default function ProjectShell() {
     }).catch(reason => { setError(String(reason)); setLoading(false) })
   }, [])
 
+  useEffect(() => {
+    if (active || !returnProject) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      void activate(returnProject.path, true)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [active, returnProject])
+
   if (!desktop) return <App />
-  if (active) return <App projectName={active.name} onRequestProjectManager={() => { setActive(null); setLoading(false) }} />
+  if (active) return <App projectName={active.name} onRequestProjectManager={() => { setReturnProject(active); setActive(null); setLoading(false) }} />
 
   const chooseExisting = async () => {
     const selected = await open({ directory: true, multiple: false, title: '打开 Wordverse 项目' })
@@ -67,5 +79,5 @@ export default function ProjectShell() {
   }
   const forget = (projectId: string) => { const next = recents.filter(item => item.projectId !== projectId); setRecents(next); localStorage.setItem(RECENTS_KEY, JSON.stringify(next)) }
 
-  return <main className={`project-launcher${dark ? ' dark' : ''}`}><section className="project-launcher-card"><header><Sparkles size={22}/><div><strong>Wordverse</strong><span>选择一个词网项目继续</span></div></header><div className="project-create"><input value={createName} onChange={event => setCreateName(event.target.value)} placeholder="新项目名称，例如：工作"/><button disabled={loading} onClick={() => void create()}><Plus size={15}/>在空文件夹新建</button></div><button className="project-open" disabled={loading} onClick={() => void chooseExisting()}><FolderOpen size={16}/>打开已有项目</button>{recents.length > 0 && <div className="recent-projects"><h2>最近项目</h2>{recents.map(project => <div key={project.projectId}><button disabled={loading} onClick={() => void activate(project.path, true)}><strong>{project.name}</strong><span>{project.path}</span></button><button aria-label={`移除${project.name}`} onClick={() => forget(project.projectId)}><X size={13}/></button></div>)}</div>}{loading && <p className="project-message">正在验证项目…</p>}{error && <p className="project-message error">{error}</p>}</section></main>
+  return <main className={`project-launcher${dark ? ' dark' : ''}`}><section className="project-launcher-card">{returnProject && <button className="project-return" title="返回当前项目（Esc）" aria-label="返回当前项目" disabled={loading} onClick={() => void activate(returnProject.path, true)}><ArrowLeft size={16}/></button>}<header><Sparkles size={22}/><div><strong>Wordverse</strong><span>选择一个词网项目继续</span></div></header><div className="project-create"><input value={createName} onChange={event => setCreateName(event.target.value)} placeholder="新项目名称，例如：工作"/><button disabled={loading} onClick={() => void create()}><Plus size={15}/>在空文件夹新建</button></div><button className="project-open" disabled={loading} onClick={() => void chooseExisting()}><FolderOpen size={16}/>打开已有项目</button>{recents.length > 0 && <div className="recent-projects"><h2>最近项目</h2>{recents.map(project => <div key={project.projectId}><button disabled={loading} onClick={() => void activate(project.path, true)}><strong>{project.name}</strong><span>{project.path}</span></button><button aria-label={`移除${project.name}`} onClick={() => forget(project.projectId)}><X size={13}/></button></div>)}</div>}{loading && <p className="project-message">正在验证项目…</p>}{error && <p className="project-message error">{error}</p>}</section></main>
 }

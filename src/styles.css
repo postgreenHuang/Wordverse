@@ -202,3 +202,20 @@ textarea { width:100%; min-height:88px; resize:vertical; padding:10px; border:1p
 .project-launcher.dark .project-open { background:var(--launcher-soft); color:var(--launcher-ink); }
 .project-launcher.dark .recent-projects > div > button:last-child { color:var(--launcher-muted); }
 .project-launcher.dark .recent-projects > div > button:last-child:hover { background:var(--launcher-soft); color:var(--launcher-ink); }
+.project-launcher-card { position:relative; }
+.project-return { position:absolute; top:13px; left:13px; width:30px; height:30px; display:grid; place-items:center; border:1px solid rgba(20,24,30,.1); border-radius:7px; color:#656a72; }
+.project-return:hover:not(:disabled) { color:#17191d; background:#f0f1f3; }
+.project-return:disabled { opacity:.45; cursor:default; }
+.project-launcher-card:has(.project-return) > header { padding-left:42px; }
+.project-launcher.dark .project-return { border-color:var(--launcher-line); color:var(--launcher-muted); }
+.project-launcher.dark .project-return:hover:not(:disabled) { color:var(--launcher-ink); background:var(--launcher-soft); }
+/* Theme-aware scrollbars: dark panels must not inherit the browser's light track. */
+.app, .project-launcher { scrollbar-width:thin; scrollbar-color:rgba(92,98,108,.58) transparent; }
+.app ::-webkit-scrollbar, .project-launcher ::-webkit-scrollbar { width:10px; height:10px; }
+.app ::-webkit-scrollbar-track, .project-launcher ::-webkit-scrollbar-track { background:transparent; }
+.app ::-webkit-scrollbar-thumb, .project-launcher ::-webkit-scrollbar-thumb { border:3px solid transparent; border-radius:999px; background:rgba(92,98,108,.48); background-clip:padding-box; }
+.app ::-webkit-scrollbar-thumb:hover, .project-launcher ::-webkit-scrollbar-thumb:hover { background:rgba(78,84,94,.72); background-clip:padding-box; }
+.app.dark, .project-launcher.dark { scrollbar-color:rgba(151,160,172,.56) rgba(15,18,23,.34); }
+.app.dark ::-webkit-scrollbar-track, .project-launcher.dark ::-webkit-scrollbar-track { background:rgba(12,15,19,.26); }
+.app.dark ::-webkit-scrollbar-thumb, .project-launcher.dark ::-webkit-scrollbar-thumb { background:rgba(151,160,172,.55); background-clip:padding-box; }
+.app.dark ::-webkit-scrollbar-thumb:hover, .project-launcher.dark ::-webkit-scrollbar-thumb:hover { background:rgba(190,198,209,.76); background-clip:padding-box; }
