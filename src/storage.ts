@@ -263,8 +263,8 @@ function fileAsDataUrl(file: File): Promise<string> {
 }
 
 export async function storeImageAsset(file: File): Promise<string> {
-  if (!file.type.startsWith('image/')) throw new Error('unsupported_image_format')
-  if (file.size > 12 * 1024 * 1024) throw new Error('image_size_invalid')
+  // Clipboard screenshots in WebView2 may have an empty MIME type. Rust validates the actual bytes. 
+  if (file.size <= 0 || file.size > 12 * 1024 * 1024) throw new Error('image_size_invalid')
   if (!isTauri) return fileAsDataUrl(file)
   return invoke<string>('save_image_asset', { bytes: Array.from(new Uint8Array(await file.arrayBuffer())) })
 }
@@ -275,8 +275,8 @@ export async function resolveImageAsset(value: string): Promise<string> {
   const cacheKey = `${localStorage.getItem('wordverse.activeProjectId') || 'legacy-default'}:${value}`
   const cached = resolvedAssets.get(cacheKey)
   if (cached) return cached
-  const path = await invoke<string>('resolve_image_asset', { reference: value })
-  const source = convertFileSrc(path)
+  const resolved = await invoke<string>('resolve_image_asset', { reference: value })
+  const source = resolved.startsWith('data:image/') ? resolved : convertFileSrc(resolved)
   resolvedAssets.set(cacheKey, source)
   return source
 }

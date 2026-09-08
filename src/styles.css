@@ -219,3 +219,13 @@ textarea { width:100%; min-height:88px; resize:vertical; padding:10px; border:1p
 .app.dark ::-webkit-scrollbar-track, .project-launcher.dark ::-webkit-scrollbar-track { background:rgba(12,15,19,.26); }
 .app.dark ::-webkit-scrollbar-thumb, .project-launcher.dark ::-webkit-scrollbar-thumb { background:rgba(151,160,172,.55); background-clip:padding-box; }
 .app.dark ::-webkit-scrollbar-thumb:hover, .project-launcher.dark ::-webkit-scrollbar-thumb:hover { background:rgba(190,198,209,.76); background-clip:padding-box; }
+.image-editor { min-height:84px; display:grid; place-items:center; gap:8px; margin-top:4px; padding:8px; border:1px dashed var(--line); border-radius:7px; color:var(--muted); outline:none; }
+.image-editor:focus { border-color:color-mix(in srgb,var(--ink) 35%,var(--line)); background:color-mix(in srgb,var(--soft) 35%,transparent); }
+.image-editor > img { width:100%; max-height:160px; border-radius:6px; object-fit:cover; }
+.image-paste-target { padding:12px; font-size:10px; text-align:center; }
+.image-editor-actions { width:100%; display:flex; align-items:center; justify-content:center; gap:6px; }
+.image-editor-actions label,.image-editor-actions button { display:inline-flex; align-items:center; justify-content:center; min-height:26px; padding:0 8px; border:0; border-radius:5px; background:var(--soft); color:var(--muted); font-size:10px; cursor:pointer; }
+.image-editor-actions label:hover,.image-editor-actions button:hover { color:var(--ink); background:var(--active); }
+.image-editor-actions label input { display:none; }
+.image-editor-actions small { color:var(--muted); font-size:9px; }
+.image-upload-error { width:100%; margin:0; color:#b05a62; font-size:9px; line-height:1.45; text-align:center; }

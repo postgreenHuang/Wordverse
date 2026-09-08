@@ -864,6 +864,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const [propertyName, setPropertyName] = useState('')
   const [propertyType, setPropertyType] = useState<PropertyType>('text')
   const [editingPropertyId, setEditingPropertyId] = useState('')
+  const [imageUploadError, setImageUploadError] = useState('')
   const [transformExpanded, setTransformExpanded] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ value: string; alt: string } | null>(null)
   const [expandedText, setExpandedText] = useState<{ id: string; name: string } | null>(null)
@@ -1377,15 +1378,24 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     else if (expandedTextDefinition) updateProperty(expandedTextDefinition, value)
   }
   const choosePropertyImage = async (definition: PropertyDefinition, file?: File) => {
-    if (!file || !file.type.startsWith('image/')) return
+    if (!file) return
+    setImageUploadError('')
     try { updateProperty(definition, await storeImageAsset(file)) }
-    catch { setSaveState('error') }
+    catch (error) {
+      setImageUploadError(error instanceof Error ? error.message : '图片保存失败，请重试')
+      setSaveState('error')
+    }
   }
   const pastePropertyImage = (definition: PropertyDefinition, event: ClipboardEvent<HTMLElement>) => {
-    const file = [...event.clipboardData.items].find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile()
-    if (!file) return
+    const file = [...event.clipboardData.items].find(item => item.kind === 'file')?.getAsFile()
     event.preventDefault()
+    if (!file) { setImageUploadError('剪贴板中没有找到图片。请复制图片本身，而不是文件路径或文字。'); return }
     void choosePropertyImage(definition, file)
+  }
+  const removePropertyImage = (definition: PropertyDefinition) => {
+    if (!confirm(`移除“${definition.name}”中的图片？属性会保留。`)) return
+    setImageUploadError('')
+    updateProperty(definition, '')
   }
   const restoreBackup = async (backup: WorkspaceBackup) => {
     if (!confirm(`恢复 ${formatExactTime(backup.updatedAt)} 的备份？\n当前词库会先自动备份。`)) return
@@ -1561,7 +1571,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       <section className="content-section"><div className="content-heading compact"><button title="添加属性" aria-label="添加属性" onClick={() => { setPropertyType('text'); setPropertyTarget('node') }}><Plus size={14}/></button></div>
         {!selected.note && visibleProperties.length === 0 && <div className="content-empty">点击 + 添加文本、文本序列或图片</div>}
         {selected.note && <article className="content-block"><header><span>文本</span><span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span></header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <p>{selected.note}</p>}</article>}
-        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span><span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span></header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <label className="image-property" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击选择文件，或聚焦后粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span>选择图片，或按 Ctrl + V 粘贴</span>}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/></label>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <p>{value}</p> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <a href={href} target="_blank" rel="noreferrer" title="用默认浏览器打开">{item}</a> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
+        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span><span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span></header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <p>{value}</p> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <a href={href} target="_blank" rel="noreferrer" title="用默认浏览器打开">{item}</a> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
       </section>
       <div className="inspector-footer"><span>更新于 {formatExactTime(selected.updatedAt)}</span><span>Delete 删除</span></div></> : <div className="empty-inspector">选择一个词查看属性</div>}
     </aside>

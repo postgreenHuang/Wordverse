@@ -446,7 +446,10 @@ fn resolve_image_asset(reference: String) -> Result<String, String> {
   if name.is_empty() || Path::new(name).components().count() != 1 { return Err("invalid_asset_reference".into()); }
   let path = wordverse_dir()?.join("assets").join(name);
   if !path.is_file() { return Err("asset_missing".into()); }
-  Ok(path.to_string_lossy().into_owned())
+  let bytes = fs::read(path).map_err(|error| format!("asset_read_failed: {error}"))?;
+  let extension = image_extension(&bytes).ok_or("unsupported_image_format")?;
+  let mime = match extension { "jpg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", _ => return Err("unsupported_image_format".into()) };
+  Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
 }
 
 #[tauri::command]
