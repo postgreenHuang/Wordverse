@@ -5,11 +5,12 @@ import { ArrowDown, ArrowLeft, ArrowUp, Axis3d, ChevronDown, CircleHelp, CircleP
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
 import { Color, Raycaster, Vector2, Vector3 } from 'three'
 import { initialGraph } from './data'
-import { cutRelation, deleteGraphTree, deleteWord, restoreRelation, restoreWord } from './graphOps'
+import { connectRelations, cutRelations, deleteGraphTree, deleteWord, restoreRelation, restoreWord } from './graphOps'
 import { balancedPosition, nearbyIntentPosition, relaxLayout } from './layout'
+import { pointInPolygon, segmentHitsBox, segmentHitsPolygon } from './selectionGeometry'
 import { CURRENT_SCHEMA_VERSION, parseWorkspaceDocument, portableWorkspaceJson, prepareImportedWorkspaceJson, resolveImageAsset, StorageConflictError, storeImageAsset, workspaceAutoSaveDelay, workspaceStorage, workspaceStorageLabel } from './storage'
 import type { WorkspaceBackup } from './storage'
-import type { Graph, PropertyDefinition, PropertyType, PropertyValue, WordNode } from './types'
+import type { Edge, Graph, PropertyDefinition, PropertyType, PropertyValue, WordNode } from './types'
 
 type FontStyle = 'modern' | 'serif' | 'compact'
 type SelectionMode = 'single' | 'box' | 'lasso'
@@ -459,16 +460,7 @@ function Word({ node, degree, mergeCount, selected, hovered, linking, editing, m
   </Billboard>
 }
 
-function pointInPolygon(point: { x: number; y: number }, polygon: { x: number; y: number }[]): boolean {
-  let inside = false
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const a = polygon[i], b = polygon[j]
-    if ((a.y > point.y) !== (b.y > point.y) && point.x < (b.x - a.x) * (point.y - a.y) / ((b.y - a.y) || .00001) + a.x) inside = !inside
-  }
-  return inside
-}
-
-function SelectionGesture({ mode, nodes, onSelect }: { mode: Exclude<SelectionMode, 'single'>; nodes: WordNode[]; onSelect: (ids: string[], additive: boolean) => void }) {
+function SelectionGesture({ mode, nodes, edges, onSelect }: { mode: Exclude<SelectionMode, 'single'>; nodes: WordNode[]; edges: Edge[]; onSelect: (ids: string[], edges: string[], additive: boolean) => void }) {
   const { camera, gl } = useThree()
   const [points, setPoints] = useState<{ x: number; y: number }[]>([])
   const livePoints = useRef<{ x: number; y: number }[]>([])
@@ -512,7 +504,26 @@ function SelectionGesture({ mode, nodes, onSelect }: { mode: Exclude<SelectionMo
         }).some(sample => pointInPolygon(sample, gesture)))
       return chosen ? [node.id] : []
     })
-    onSelect(ids, additive.current)
+    const nodeById = new Map(nodes.map(node => [node.id, node]))
+    const projectNode = (id: string) => {
+      const node = nodeById.get(id)
+      if (!node) return null
+      const projected = new Vector3(...node.position).project(camera)
+      if (projected.z < -1 || projected.z > 1) return null
+      return {
+        x: canvasRect.left - rect.left + (projected.x + 1) * canvasRect.width / 2,
+        y: canvasRect.top - rect.top + (1 - projected.y) * canvasRect.height / 2
+      }
+    }
+    const selectedEdgeKeys = edges.flatMap(edge => {
+      const a = projectNode(edge.source), b = projectNode(edge.target)
+      if (!a || !b) return []
+      const chosen = mode === 'box'
+        ? segmentHitsBox(a, b, minX, maxX, minY, maxY)
+        : segmentHitsPolygon(a, b, gesture)
+      return chosen ? [`${edge.source}:${edge.target}`] : []
+    })
+    onSelect(ids, selectedEdgeKeys, additive.current)
     livePoints.current = []
     setPoints([])
   }
@@ -622,7 +633,7 @@ function TransformGizmo({ nodes, mode, dark, onStart, onTransform, onEnd }: { no
     onMouseUp={() => { dragging.current = false; group.current?.scale.set(1, 1, 1); styleControls(); onEnd() }}/></>
 }
 
-function GraphScene({ graph, selectedId, selectedIds, selectionMode, gizmoMode, shortcuts, selectedEdge, editingId, linkMode, linkSource, duplicateSourceId, isMoving, gridVisible, mergeDuplicates, motionEnabled, playbackEnabled, motionSpeed, motionAmplitude, dark, fontScale, fontStyle, lineScale, gridDensity, gridClarity, gridRange, focusRequest, viewRequest, bringRequest, onBring, onSelect, onSelectMany, onSelectEdge, onOpen, onContext, onRename, onCursorPoint, onDuplicateAt, onMoveStart, onTransformMany, onMoveEnd, onFlyChange, query }: { graph: Graph; selectedId: string; selectedIds: Set<string>; selectionMode: SelectionMode; gizmoMode: 'translate' | 'scale' | null; shortcuts: ShortcutMap; selectedEdge: string; editingId: string; linkMode: 'off' | 'single' | 'continuous'; linkSource: string; duplicateSourceId: string; isMoving: boolean; gridVisible: boolean; mergeDuplicates: boolean; motionEnabled: boolean; playbackEnabled: boolean; motionSpeed: number; motionAmplitude: number; dark: boolean; fontScale: number; fontStyle: FontStyle; lineScale: number; gridDensity: number; gridClarity: number; gridRange: number; focusRequest: number; viewRequest: { view: SceneView; nonce: number; locked?: boolean } | null; bringRequest: { id: string; nonce: number } | null; onBring: (id: string, position: [number, number, number]) => void; onSelect: (id: string, additive: boolean) => void; onSelectMany: (ids: string[], additive: boolean) => void; onSelectEdge: (source: string, target: string) => void; onOpen: (node: WordNode) => void; onContext: (node: WordNode, x: number, y: number) => void; onRename: (id: string, label: string | null) => void; onCursorPoint: (position: [number, number, number]) => void; onDuplicateAt: (position: [number, number, number]) => void; onMoveStart: () => void; onTransformMany: (values: Map<string, { position: [number, number, number]; scale: number }>) => void; onMoveEnd: () => void; onFlyChange: (active: boolean) => void; query: string }) {
+function GraphScene({ graph, selectedId, selectedIds, selectionMode, gizmoMode, shortcuts, selectedEdge, selectedEdges, editingId, linkMode, linkSourceIds, duplicateSourceId, isMoving, gridVisible, mergeDuplicates, motionEnabled, playbackEnabled, motionSpeed, motionAmplitude, dark, fontScale, fontStyle, lineScale, gridDensity, gridClarity, gridRange, focusRequest, viewRequest, bringRequest, onBring, onSelect, onSelectMany, onSelectEdge, onOpen, onContext, onRename, onCursorPoint, onDuplicateAt, onMoveStart, onTransformMany, onMoveEnd, onFlyChange, query }: { graph: Graph; selectedId: string; selectedIds: Set<string>; selectionMode: SelectionMode; gizmoMode: 'translate' | 'scale' | null; shortcuts: ShortcutMap; selectedEdge: string; selectedEdges: Set<string>; editingId: string; linkMode: 'off' | 'single' | 'continuous'; linkSourceIds: string[]; duplicateSourceId: string; isMoving: boolean; gridVisible: boolean; mergeDuplicates: boolean; motionEnabled: boolean; playbackEnabled: boolean; motionSpeed: number; motionAmplitude: number; dark: boolean; fontScale: number; fontStyle: FontStyle; lineScale: number; gridDensity: number; gridClarity: number; gridRange: number; focusRequest: number; viewRequest: { view: SceneView; nonce: number; locked?: boolean } | null; bringRequest: { id: string; nonce: number } | null; onBring: (id: string, position: [number, number, number]) => void; onSelect: (id: string, additive: boolean) => void; onSelectMany: (ids: string[], edges: string[], additive: boolean) => void; onSelectEdge: (source: string, target: string) => void; onOpen: (node: WordNode) => void; onContext: (node: WordNode, x: number, y: number) => void; onRename: (id: string, label: string | null) => void; onCursorPoint: (position: [number, number, number]) => void; onDuplicateAt: (position: [number, number, number]) => void; onMoveStart: () => void; onTransformMany: (values: Map<string, { position: [number, number, number]; scale: number }>) => void; onMoveEnd: () => void; onFlyChange: (active: boolean) => void; query: string }) {
   const reduceMotion = useReducedMotion()
   const [hoveredNode, setHoveredNode] = useState('')
   const [hoveredEdge, setHoveredEdge] = useState('')
@@ -734,8 +745,8 @@ function GraphScene({ graph, selectedId, selectedIds, selectionMode, gizmoMode, 
     return position ? { ...node, position: [position.x, position.y, position.z] as [number, number, number] } : node
   })
   const animatedNodeById = new Map(animatedNodes.map(node => [node.id, node]))
-  const linkStartNode = animatedNodeById.get(linkSource)
-  const linkTargetNode = hoveredNode && hoveredNode !== linkSource ? animatedNodeById.get(hoveredNode) : undefined
+  const linkStartNodes = linkSourceIds.map(id => animatedNodeById.get(id)).filter((node): node is WordNode => !!node)
+  const linkTargetNode = hoveredNode && !linkSourceIds.includes(hoveredNode) ? animatedNodeById.get(hoveredNode) : undefined
   const duplicateSource = animatedNodeById.get(duplicateSourceId)
   const animatedGraph = { ...sceneGraph, nodes: animatedNodes }
   const movableSelection = animatedNodes.filter(node => selectedIds.has(node.id) && !node.isContextRoot)
@@ -791,14 +802,14 @@ function GraphScene({ graph, selectedId, selectedIds, selectionMode, gizmoMode, 
     {animatedGraph.edges.map((edge) => {
       const a = animatedNodeById.get(edge.source)!, b = animatedNodeById.get(edge.target)!
       const key = `${edge.source}:${edge.target}`
-      const active = hoveredEdge === key || selectedEdge === key
+      const active = hoveredEdge === key || selectedEdge === key || selectedEdges.has(key)
       const emerging = playbackEnabled && (edge.source === playbackFocusId || edge.target === playbackFocusId)
       return <Line key={key} points={[a.position, b.position]} color={active ? (dark ? '#f1f2f3' : '#08090b') : (dark ? '#848a93' : '#6e737b')} lineWidth={(active ? 2.2 : 1) * lineScale} transparent opacity={active ? .8 : emerging ? .46 : .34} onPointerEnter={(e) => { e.stopPropagation(); setHoveredEdge(key) }} onPointerLeave={() => setHoveredEdge('')} onClick={(e) => { e.stopPropagation(); if (!mergeDuplicates) onSelectEdge(edge.source, edge.target) }} onDoubleClick={(e) => { e.stopPropagation(); e.nativeEvent.stopPropagation() }} />
     })}
-    {linkStartNode && (linkTargetNode || cursorPoint) && <Line points={[linkStartNode.position, linkTargetNode?.position || cursorPoint!]} color={dark ? '#f1f2f3' : '#111318'} lineWidth={1.6} dashed dashSize={.16} gapSize={.1} transparent opacity={.72} />}
+    {linkStartNodes.map(source => (linkTargetNode || cursorPoint) && <Line key={`link-preview:${source.id}`} points={[source.position, linkTargetNode?.position || cursorPoint!]} color={dark ? '#f1f2f3' : '#111318'} lineWidth={1.6} dashed dashSize={.16} gapSize={.1} transparent opacity={.72} />)}
     {duplicateSource && cursorPoint && <><Line points={[duplicateSource.position, cursorPoint]} color={dark ? '#c7cbd1' : '#555a62'} lineWidth={1.2} dashed dashSize={.13} gapSize={.11} transparent opacity={.52}/><Billboard position={cursorPoint} follow><mesh><circleGeometry args={[.72, 48]}/><meshBasicMaterial color={dark ? '#ffffff' : '#111318'} transparent opacity={.045} depthWrite={false}/></mesh><Text position={[0, 0, .05]} font={fontStyle === 'serif' ? '/fonts/NotoSerifSC-Medium.ttf' : '/fonts/NotoSansSC-Medium.ttf'} fontSize={.27 * fontScale} color={dark ? '#d9dce0' : '#31343a'} anchorX="center" anchorY="middle" material-fog={false}>{duplicateSource.label}</Text></Billboard></>}
-    {animatedNodes.map(node => <Word key={node.id} node={node} selected={selectedIds.has(node.id)} hovered={node.id === hoveredNode} linking={node.id === linkSource || (!!linkSource && node.id === hoveredNode)} editing={node.id === editingId} mergeCount={display.counts.get(node.id) || 1} motionEnabled={playbackEnabled && motionEnabled} playbackFocused={playbackEnabled && node.id === playbackFocusId} reduceMotion={reduceMotion} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} degree={sceneStats.degrees.get(node.id) || 0} onSelect={(additive) => onSelect(node.id, additive)} onOpen={() => { if (linkMode === 'off') onOpen(node) }} onContext={(x, y) => onContext(node, x, y)} onRename={(label) => onRename(node.id, label)} onEnter={() => setHoveredNode(node.id)} onLeave={() => setHoveredNode('')} />)}
-    {selectionMode !== 'single' && linkMode === 'off' && !duplicateSourceId && <SelectionGesture mode={selectionMode} nodes={animatedNodes} onSelect={onSelectMany}/>} 
+    {animatedNodes.map(node => <Word key={node.id} node={node} selected={selectedIds.has(node.id)} hovered={node.id === hoveredNode} linking={linkSourceIds.includes(node.id) || (!!linkSourceIds.length && node.id === hoveredNode)} editing={node.id === editingId} mergeCount={display.counts.get(node.id) || 1} motionEnabled={playbackEnabled && motionEnabled} playbackFocused={playbackEnabled && node.id === playbackFocusId} reduceMotion={reduceMotion} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} degree={sceneStats.degrees.get(node.id) || 0} onSelect={(additive) => onSelect(node.id, additive)} onOpen={() => { if (linkMode === 'off') onOpen(node) }} onContext={(x, y) => onContext(node, x, y)} onRename={(label) => onRename(node.id, label)} onEnter={() => setHoveredNode(node.id)} onLeave={() => setHoveredNode('')} />)}
+    {selectionMode !== 'single' && linkMode === 'off' && !duplicateSourceId && <SelectionGesture mode={selectionMode} nodes={animatedNodes} edges={animatedGraph.edges} onSelect={onSelectMany}/>}
     {selectionMode === 'single' && gizmoMode && linkMode === 'off' && !duplicateSourceId && !playbackEnabled && !editingId && movableSelection.length > 0 && <TransformGizmo nodes={movableSelection} mode={gizmoMode} dark={dark} onStart={onMoveStart} onTransform={onTransformMany} onEnd={onMoveEnd}/>} 
     <CameraKeys graph={sceneGraph} selectedId={selectedId} focusRequest={focusRequest} viewRequest={viewRequest} viewLocked={!!viewRequest?.locked} bringRequest={bringRequest} playbackEnabled={playbackEnabled} shortcuts={shortcuts} onBring={onBring} onPlaybackFocus={setPlaybackFocusId} onFlyChange={onFlyChange} enabled={selectionMode === 'single' && linkMode === 'off' && !isMoving && !playbackEnabled} />
   </>
@@ -843,9 +854,10 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const [bringRequest, setBringRequest] = useState<{ id: string; nonce: number } | null>(null)
   const sceneCursorPoint = useRef<[number, number, number] | null>(null)
   const [linkMode, setLinkMode] = useState<'off' | 'single' | 'continuous'>('off')
-  const [linkSource, setLinkSource] = useState('')
+  const [linkSourceIds, setLinkSourceIds] = useState<string[]>([])
   const [duplicateSourceId, setDuplicateSourceId] = useState('')
   const [selectedEdge, setSelectedEdge] = useState('')
+  const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set())
   const [sceneFullscreen, setSceneFullscreen] = useState(() => localStorage.getItem('wordverse.sceneFullscreen') === 'true')
   const [sceneFailure, setSceneFailure] = useState(false)
   const [sceneGeneration, setSceneGeneration] = useState(0)
@@ -919,6 +931,12 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     setTraceEntries(current => [...current.slice(-199), { time, level, scope, message }])
   }, [])
   const selected = graph.nodes.find(n => n.id === selectedId) || graph.nodes[0]
+  useEffect(() => {
+    setSelectedEdge('')
+    setSelectedEdges(new Set())
+    setLinkMode('off')
+    setLinkSourceIds([])
+  }, [graph.id])
   useEffect(() => {
     setSelectedIds(current => {
       if (!selectedId) return current.size ? new Set() : current
@@ -1146,14 +1164,14 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
         }
       }
       if (!typing && !editingId && matchesShortcut(event, shortcuts.fullscreen)) { event.preventDefault(); setSceneFullscreen(value => !value); setSettingsOpen(false); setContextMenu(null) }
-      if (!typing && (matchesShortcut(event, shortcuts.link) || matchesShortcut(event, shortcuts.linkContinuous))) { event.preventDefault(); setDuplicateSourceId(''); const mode = matchesShortcut(event, shortcuts.linkContinuous) ? 'continuous' : 'single'; setMergeDuplicates(false); setLinkMode(mode); setLinkSource(selectedId); setSelectedEdge(''); setContextMenu(null) }
+      if (!typing && (matchesShortcut(event, shortcuts.link) || matchesShortcut(event, shortcuts.linkContinuous))) { event.preventDefault(); setDuplicateSourceId(''); const mode = matchesShortcut(event, shortcuts.linkContinuous) ? 'continuous' : 'single'; const sources = selectedId && selectedIds.has(selectedId) && selectedIds.size > 1 ? [...selectedIds] : selectedId ? [selectedId] : []; setMergeDuplicates(false); setLinkMode(mode); setLinkSourceIds(sources); setSelectedEdge(''); setSelectedEdges(new Set()); setContextMenu(null) }
       if (!typing && !flyNavigation && matchesShortcut(event, shortcuts.selectSingle)) { event.preventDefault(); cancelActiveMode(); setSelectionMode('single'); setGizmoMode(null) }
       if (!typing && !flyNavigation && matchesShortcut(event, shortcuts.gizmoMove)) { event.preventDefault(); cancelActiveMode(); setSelectionMode('single'); setGizmoMode('translate') }
       if (!typing && !flyNavigation && matchesShortcut(event, shortcuts.gizmoScale)) { event.preventDefault(); cancelActiveMode(); setSelectionMode('single'); setGizmoMode('scale') }
       if (!typing && !flyNavigation && matchesShortcut(event, shortcuts.selectBox)) { event.preventDefault(); cancelActiveMode(); setSelectionMode('box'); setGizmoMode(null) }
       if (!typing && !flyNavigation && matchesShortcut(event, shortcuts.selectLasso)) { event.preventDefault(); cancelActiveMode(); setSelectionMode('lasso'); setGizmoMode(null) }
       if (!typing && matchesShortcut(event, shortcuts.remove)) {
-        if (selectedEdge) { event.preventDefault(); const [source, target] = selectedEdge.split(':'); cut(source, target); setSelectedEdge('') }
+        if (selectedEdges.size || selectedEdge) { event.preventDefault(); const keys = selectedEdges.size ? [...selectedEdges] : [selectedEdge]; setGraph(current => cutRelations(current, keys.map(key => { const [source, target] = key.split(':'); return { source, target } }), new Date().toISOString())); setSelectedEdge(''); setSelectedEdges(new Set()) }
         else if (selectedId) { event.preventDefault(); removeNode() }
       }
       if (!typing && matchesShortcut(event, shortcuts.redo)) { event.preventDefault(); redo() }
@@ -1161,7 +1179,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       if (matchesShortcut(event, shortcuts.search)) { event.preventDefault(); searchInputRef.current?.focus(); searchInputRef.current?.select() }
     }
     addEventListener('keydown', back); return () => removeEventListener('keydown', back)
-  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedEdge, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation])
+  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedIds, selectedEdge, selectedEdges, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation])
   const setGraph = (change: (graph: Graph) => Graph) => commitGraphs(all => ({ ...all, [graph.id]: change(all[graph.id] || graph) }))
   const update = (patch: Partial<WordNode>) => setGraph(g => ({ ...g, nodes: g.nodes.map(n => n.id === selected.id ? { ...n, ...patch, updatedAt: new Date().toISOString() } : n) }))
   const updatePositionAxis = (axis: number, rawValue: string) => {
@@ -1206,10 +1224,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     setGraph(g => ({ ...g, nodes: g.nodes.map(n => n.id === node.id ? { ...n, hasChildGraph: true } : n) }))
     setPath(p => [...p, id]); setTimeout(() => setSelectedId(''), 0)
   }
-  const connect = (source: string, target: string) => setGraph(g => g.edges.some(e => (e.source === source && e.target === target) || (e.source === target && e.target === source)) ? g : ({ ...g, edges: [...g.edges, { source, target }] }))
-  const cut = (source: string, target: string) => setGraph(g => {
-    return cutRelation(g, source, target, new Date().toISOString())
-  })
+  const connectMany = (sources: string[], target: string) => setGraph(g => connectRelations(g, sources, target))
   const beginNodeMove = () => {
     undoStack.current.push(graphs); if (undoStack.current.length > 80) undoStack.current.shift()
     redoStack.current = []
@@ -1223,7 +1238,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   }
   const bringNodeIntoView = (id: string, position: [number, number, number]) => setGraph(g => ({ ...g, nodes: g.nodes.map(node => node.id === id ? { ...node, position, positionLocked: true, updatedAt: new Date().toISOString() } : node) }))
   const activateNode = (id: string, additive = false) => {
-    setSelectedEdge('')
+    setSelectedEdge(''); setSelectedEdges(new Set())
     if (linkMode === 'off') {
       if (additive && selectedIds.has(id)) {
         const next = new Set(selectedIds); next.delete(id)
@@ -1234,25 +1249,33 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       }
       return
     }
-    if (!linkSource) { setLinkSource(id); setSelectedId(id); return }
-    if (id === linkSource) return
-    connect(linkSource, id); setSelectedId(id)
-    if (linkMode === 'single') { setLinkMode('off'); setLinkSource('') }
+    if (!linkSourceIds.length) { setLinkSourceIds([id]); setSelectedId(id); return }
+    const sources = linkSourceIds.filter(source => source !== id)
+    if (!sources.length) return
+    connectMany(sources, id); setSelectedIds(new Set([id])); setSelectedId(id)
+    if (linkMode === 'single') { setLinkMode('off'); setLinkSourceIds([]) }
   }
-  const selectMany = (ids: string[], additive: boolean) => {
-    setSelectedEdge('')
+  const selectMany = (ids: string[], edgeKeys: string[], additive: boolean) => {
     const primary = ids[ids.length - 1] || (additive ? selectedId : '')
     setSelectedIds(current => {
       const next = additive ? new Set(current) : new Set<string>()
       ids.forEach(id => next.add(id))
       return next
     })
-    setSelectedId(primary)
-    setSelectionMode('single'); setGizmoMode('translate')
-    trace('selection', `${additive ? 'Added' : 'Selected'} ${ids.length} node(s)`)
+    setSelectedEdges(current => {
+      const next = additive ? new Set(current) : new Set<string>()
+      edgeKeys.forEach(key => next.add(key))
+      return next
+    })
+    setSelectedId(primary); setSelectedEdge(edgeKeys.at(-1) || (additive ? selectedEdge : ''))
+    setSelectionMode('single'); setGizmoMode(ids.length ? 'translate' : null)
+    trace('selection', `${additive ? 'Added' : 'Selected'} ${ids.length} node(s), ${edgeKeys.length} relation(s)`)
   }
-  const startLink = (nodeId = selectedId, mode: 'single' | 'continuous' = 'single') => { setMergeDuplicates(false); setLinkMode(mode); setLinkSource(nodeId); setSelectedEdge(''); setContextMenu(null) }
-  const cancelActiveMode = () => { setLinkMode('off'); setLinkSource(''); setDuplicateSourceId(''); setContextMenu(null) }
+  const startLink = (nodeId = selectedId, mode: 'single' | 'continuous' = 'single') => {
+    const sources = nodeId && selectedIds.has(nodeId) && selectedIds.size > 1 ? [...selectedIds] : nodeId ? [nodeId] : []
+    setMergeDuplicates(false); setLinkMode(mode); setLinkSourceIds(sources); setSelectedEdge(''); setSelectedEdges(new Set()); setContextMenu(null)
+  }
+  const cancelActiveMode = () => { setLinkMode('off'); setLinkSourceIds([]); setDuplicateSourceId(''); setContextMenu(null) }
   const openGraphTab = (graphId: string) => {
     const existing = tabs.find(tab => tab.path[tab.path.length - 1] === graphId)
     if (existing) { setActiveTabId(existing.id); setSelectedId(''); return }
@@ -1568,7 +1591,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     <main className={`space${consoleOpen ? ' console-visible' : ''}`}>
       <button className="scene-back" aria-label="返回上一级" title="返回上一级（Esc）" disabled={path.length <= 1} onClick={() => { cancelActiveMode(); navigateBack() }}><ArrowLeft size={17}/></button>
       <div className="space-top"><label className="search global"><Search size={16}/><input ref={searchInputRef} value={query} onChange={e => setQuery(e.target.value)} placeholder="检索当前词网（空格分隔）"/><kbd>⌘ K</kbd></label><button className={mergeDuplicates ? 'soft merge-active' : 'soft'} aria-pressed={mergeDuplicates} onClick={() => { cancelActiveMode(); setMergeDuplicates(value => !value) }}><Link2 size={15}/> 同词合并 <span className="toggle"/></button></div>
-      <div className="canvas" onDoubleClick={() => { if (!sceneFailure && selectionMode === 'single' && linkMode === 'off' && !duplicateSourceId && !isMoving && !editingId && !playbackEnabled) addNode('新词', sceneCursorPoint.current || undefined) }} onContextMenu={event => { event.preventDefault(); setGraphContextMenu(null); if ((linkMode !== 'off' || duplicateSourceId) && !contextMenu) cancelActiveMode() }}>{sceneFailure ? <div className="scene-recovery" role="alert"><Sparkles size={22}/><strong>三维场景暂时不可用</strong><p>显卡上下文已中断，词库数据没有受到影响。</p><button onClick={() => { setSceneGeneration(value => value + 1); setSceneFailure(false) }}>重新启动场景</button></div> : <Canvas key={sceneGeneration} fallback={<div className="scene-recovery"><strong>无法启动三维场景</strong><p>请确认系统 WebView2 和图形加速可用。</p></div>} gl={{ alpha: true }} camera={{ position: [0, 0, 11], fov: 47 }} dpr={graph.nodes.length > 400 ? [0.8, 1.2] : [1, 1.6]}><SceneHealth onContextLost={() => { setPlaybackEnabled(false); setSceneFailure(true) }}/><GraphScene graph={graph} selectedId={selectedId} selectedIds={selectedIds} selectionMode={selectionMode} gizmoMode={gizmoMode} shortcuts={shortcuts} selectedEdge={selectedEdge} editingId={editingId} linkMode={linkMode} linkSource={linkSource} duplicateSourceId={duplicateSourceId} isMoving={isMoving} gridVisible={gridVisible} mergeDuplicates={mergeDuplicates} motionEnabled={motionEnabled} playbackEnabled={playbackEnabled} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} lineScale={lineScale} gridDensity={gridDensity} gridClarity={gridClarity} gridRange={gridRange} focusRequest={focusRequest} viewRequest={viewRequest} bringRequest={bringRequest} onBring={bringNodeIntoView} onSelect={activateNode} onSelectMany={selectMany} onSelectEdge={(source, target) => { setSelectedEdge(`${source}:${target}`); setSelectedId(''); cancelActiveMode() }} onOpen={enterGraph} onContext={(node, x, y) => { setGraphContextMenu(null); setSelectedIds(new Set([node.id])); setSelectedId(node.id); setContextMenu({ node, x, y }) }} onRename={renameNode} onCursorPoint={(position) => { sceneCursorPoint.current = position }} onDuplicateAt={duplicateNodeAt} onMoveStart={() => { setPlaybackEnabled(false); cancelActiveMode(); setIsMoving(true); beginNodeMove() }} onTransformMany={transformNodes} onMoveEnd={finishNodeMove} onFlyChange={setFlyNavigation} query={query}/></Canvas>}</div>
+      <div className="canvas" onDoubleClick={() => { if (!sceneFailure && selectionMode === 'single' && linkMode === 'off' && !duplicateSourceId && !isMoving && !editingId && !playbackEnabled) addNode('新词', sceneCursorPoint.current || undefined) }} onContextMenu={event => { event.preventDefault(); setGraphContextMenu(null); if ((linkMode !== 'off' || duplicateSourceId) && !contextMenu) cancelActiveMode() }}>{sceneFailure ? <div className="scene-recovery" role="alert"><Sparkles size={22}/><strong>三维场景暂时不可用</strong><p>显卡上下文已中断，词库数据没有受到影响。</p><button onClick={() => { setSceneGeneration(value => value + 1); setSceneFailure(false) }}>重新启动场景</button></div> : <Canvas key={sceneGeneration} fallback={<div className="scene-recovery"><strong>无法启动三维场景</strong><p>请确认系统 WebView2 和图形加速可用。</p></div>} gl={{ alpha: true }} camera={{ position: [0, 0, 11], fov: 47 }} dpr={graph.nodes.length > 400 ? [0.8, 1.2] : [1, 1.6]}><SceneHealth onContextLost={() => { setPlaybackEnabled(false); setSceneFailure(true) }}/><GraphScene graph={graph} selectedId={selectedId} selectedIds={selectedIds} selectionMode={selectionMode} gizmoMode={gizmoMode} shortcuts={shortcuts} selectedEdge={selectedEdge} selectedEdges={selectedEdges} editingId={editingId} linkMode={linkMode} linkSourceIds={linkSourceIds} duplicateSourceId={duplicateSourceId} isMoving={isMoving} gridVisible={gridVisible} mergeDuplicates={mergeDuplicates} motionEnabled={motionEnabled} playbackEnabled={playbackEnabled} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} lineScale={lineScale} gridDensity={gridDensity} gridClarity={gridClarity} gridRange={gridRange} focusRequest={focusRequest} viewRequest={viewRequest} bringRequest={bringRequest} onBring={bringNodeIntoView} onSelect={activateNode} onSelectMany={selectMany} onSelectEdge={(source, target) => { const key = `${source}:${target}`; setSelectedEdge(key); setSelectedEdges(new Set([key])); setSelectedIds(new Set()); setSelectedId(''); cancelActiveMode() }} onOpen={enterGraph} onContext={(node, x, y) => { setGraphContextMenu(null); setSelectedIds(new Set([node.id])); setSelectedId(node.id); setContextMenu({ node, x, y }) }} onRename={renameNode} onCursorPoint={(position) => { sceneCursorPoint.current = position }} onDuplicateAt={duplicateNodeAt} onMoveStart={() => { setPlaybackEnabled(false); cancelActiveMode(); setIsMoving(true); beginNodeMove() }} onTransformMany={transformNodes} onMoveEnd={finishNodeMove} onFlyChange={setFlyNavigation} query={query}/></Canvas>}</div>
       <div className="scene-view-gizmo" aria-label="场景视图">
         <button className={`view-cube${lockedView === 'perspective' ? ' locked' : ''}`} title="等距透视（Ctrl 点击锁定）" onClick={event => chooseSceneView('perspective', event.ctrlKey || event.metaKey)}><Axis3d size={17}/></button>
         <div className="view-faces">
@@ -1583,7 +1606,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
         <button className={selectionMode === 'box' ? 'active' : ''} title="框选（B）" onClick={() => { cancelActiveMode(); setSelectionMode('box'); setGizmoMode(null) }}><SquareDashedMousePointer size={15}/></button>
         <button className={selectionMode === 'lasso' ? 'active' : ''} title="圈选（C）" onClick={() => { cancelActiveMode(); setSelectionMode('lasso'); setGizmoMode(null) }}><LassoSelect size={15}/></button>
       </div>
-      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSource ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动选择 · Ctrl/Shift 追加 · 完成后进入 T 移动 · R/Esc 退出</span></> : selectedEdge ? <><strong>已选择连线</strong><span>&lt; 查看起点 · &gt; 查看终点 · Delete 斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Alt+D 复制连接</span><span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
+      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkSourceIds.length > 1 ? `批量连接中 · ${linkSourceIds.length} 个起点` : linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSourceIds.length ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动可选择词与连线 · Ctrl/Shift 追加</span></> : (selectedEdges.size || selectedEdge) ? <><strong>已选择 {selectedEdges.size || 1} 条连线</strong><span>&lt; / &gt; 查看端点 · Delete 批量斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Alt+D 复制连接</span><span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
       <div className="scene-tools"><button onClick={() => addNode()}><Plus size={18}/></button><button className={linkMode !== 'off' ? 'tool-active' : ''} title="建立连接（L）" onClick={() => linkMode === 'off' ? startLink() : cancelActiveMode()}><Link2 size={17}/></button><button title="聚焦（F）" onClick={() => setFocusRequest(value => value + 1)}><Focus size={18}/></button><button disabled={reduceMotion} className={playbackEnabled ? 'tool-active playback-active' : ''} title={reduceMotion ? '系统已启用“减少动态效果”' : playbackEnabled ? '停止词网漫游' : '播放词网漫游'} onClick={() => { cancelActiveMode(); setPlaybackEnabled(value => !value) }}><Play size={17}/></button><button title="返回当前主词网" onClick={() => { setPlaybackEnabled(false); setPath([path[0]]); setSelectedId(''); setFocusRequest(value => value + 1) }}><Home size={17}/></button></div>
       {draftGraphName !== null && <form className="quick-create" onSubmit={event => { event.preventDefault(); if (draftGraphName.trim()) createMainGraph(draftGraphName) }}><span>主词网</span><input autoFocus value={draftGraphName} onChange={event => setDraftGraphName(event.target.value)} placeholder="输入词网名称…"/><kbd>Enter</kbd><button type="button" onClick={() => setDraftGraphName(null)}><X size={14}/></button></form>}
       {contextMenu && <div className="node-menu" style={{ left: contextMenu.x, top: contextMenu.y }}><button onClick={() => { setEditingId(contextMenu.node.id); setContextMenu(null) }}>重命名 <kbd>F2</kbd></button><button onClick={() => startLink(contextMenu.node.id)}><Link2 size={14}/>建立连接</button><button onClick={() => { setBringRequest({ id: contextMenu.node.id, nonce: Date.now() }); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}><LocateFixed size={14}/>移到当前视野</button><button onClick={() => { enterGraph(contextMenu.node); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}>进入子词网</button></div>}

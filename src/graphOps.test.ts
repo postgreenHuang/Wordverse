@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cutRelation, deleteGraphTree, deleteWord, graphTreeIds, restoreRelation, restoreWord } from './graphOps'
+import { connectRelations, cutRelation, cutRelations, deleteGraphTree, deleteWord, graphTreeIds, restoreRelation, restoreWord } from './graphOps'
 import type { Graph, WordNode } from './types'
 
 const word = (id: string, extra: Partial<WordNode> = {}): WordNode => ({ id, label: id, note: '', tags: [], links: [], position: [0, 0, 0], scale: 1, ...extra })
@@ -36,6 +36,25 @@ describe('recoverable graph mutations', () => {
     const duplicate = restoreRelation({ ...cut, edges: [{ source: 'b', target: 'a' }] }, 'a', 'b', 'cut-time')
     expect(duplicate.edges).toHaveLength(1)
     expect(duplicate.deletedEdges).toEqual([])
+  })
+
+  it('connects many selected words to one target without duplicates or self-links', () => {
+    const connected = connectRelations(graph(), ['a', 'b', 'b', 'missing'], 'c')
+    expect(connected.edges).toEqual([
+      { source: 'a', target: 'b' },
+      { source: 'b', target: 'c' },
+      { source: 'a', target: 'c' },
+    ])
+    expect(connectRelations(connected, ['a', 'c'], 'c')).toBe(connected)
+  })
+
+  it('cuts many selected relations as one recoverable graph mutation', () => {
+    const cut = cutRelations(graph(), [{ source: 'b', target: 'a' }, { source: 'b', target: 'c' }], 'batch-cut')
+    expect(cut.edges).toEqual([])
+    expect(cut.deletedEdges).toEqual([
+      { edge: { source: 'a', target: 'b' }, deletedAt: 'batch-cut' },
+      { edge: { source: 'b', target: 'c' }, deletedAt: 'batch-cut' },
+    ])
   })
 
   it('keeps a deleted relation recoverable while an endpoint is missing', () => {

@@ -4,6 +4,28 @@ const sameUndirectedEdge = (left: Edge, right: Edge) =>
   (left.source === right.source && left.target === right.target) ||
   (left.source === right.target && left.target === right.source)
 
+export function connectRelations(graph: Graph, sources: string[], target: string): Graph {
+  const nodeIds = new Set(graph.nodes.map(node => node.id))
+  if (!nodeIds.has(target)) return graph
+  const edges = [...graph.edges]
+  for (const source of new Set(sources)) {
+    if (!nodeIds.has(source) || source === target) continue
+    const relation = { source, target }
+    if (!edges.some(edge => sameUndirectedEdge(edge, relation))) edges.push(relation)
+  }
+  return edges.length === graph.edges.length ? graph : { ...graph, edges }
+}
+
+export function cutRelations(graph: Graph, relations: Edge[], deletedAt: string): Graph {
+  const removed = graph.edges.filter(edge => relations.some(relation => sameUndirectedEdge(edge, relation)))
+  if (!removed.length) return graph
+  return {
+    ...graph,
+    edges: graph.edges.filter(edge => !removed.includes(edge)),
+    deletedEdges: [...(graph.deletedEdges || []), ...removed.map(edge => ({ edge, deletedAt }))],
+  }
+}
+
 export function cutRelation(graph: Graph, source: string, target: string, deletedAt: string): Graph {
   const edge = graph.edges.find(candidate => sameUndirectedEdge(candidate, { source, target }))
   if (!edge) return graph
