@@ -472,6 +472,7 @@ fn import_workspace_document(document: String) -> Result<String, String> {
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_opener::init())
     .invoke_handler(tauri::generate_handler![default_project, activate_project, create_project, load_workspace, save_workspace, list_workspace_backups, restore_workspace_backup, save_conflict_copy, save_image_asset, resolve_image_asset, export_workspace_document, import_workspace_document])
     .setup(|app| {
       if cfg!(debug_assertions) {

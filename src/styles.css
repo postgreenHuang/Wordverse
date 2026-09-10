@@ -229,3 +229,5 @@ textarea { width:100%; min-height:88px; resize:vertical; padding:10px; border:1p
 .image-editor-actions label input { display:none; }
 .image-editor-actions small { color:var(--muted); font-size:9px; }
 .image-upload-error { width:100%; margin:0; color:#b05a62; font-size:9px; line-height:1.45; text-align:center; }
+.content-block > p a,.content-list a { color:var(--ink); text-decoration:underline; text-decoration-color:color-mix(in srgb,var(--ink) 28%,transparent); text-underline-offset:3px; cursor:pointer; }
+.content-block > p a:hover,.content-list a:hover { text-decoration-color:currentColor; }
