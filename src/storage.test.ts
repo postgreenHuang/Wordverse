@@ -56,6 +56,16 @@ describe('workspace schema boundary', () => {
     expect(parsed.graphs.root.edges).toEqual([{ source: 'word', target: 'second' }])
   })
 
+  it('preserves valid Ghost source locators and rejects malformed ones', () => {
+    const source = documentAt(1) as unknown as Record<string, any>
+    source.graphs.root.nodes.push(
+      { id: 'ghost', label: '记忆', note: '', tags: [], links: [], position: [1, 0, 0], scale: 1, ghostSource: { graphId: 'root', nodeId: 'word' } },
+      { id: 'bad-ghost', label: '错误', note: '', tags: [], links: [], position: [2, 0, 0], scale: 1, ghostSource: { graphId: 3, nodeId: '' } },
+    )
+    const nodes = parseWorkspaceDocument(source)!.graphs.root.nodes
+    expect(nodes.find(node => node.id === 'ghost')?.ghostSource).toEqual({ graphId: 'root', nodeId: 'word' })
+    expect(nodes.find(node => node.id === 'bad-ghost')?.ghostSource).toBeUndefined()
+  })
   it('normalizes optional node fields and filters malformed content', () => {
     const source = documentAt(1) as unknown as Record<string, any>
     source.graphs.root.nodes[0] = {

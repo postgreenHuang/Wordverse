@@ -256,6 +256,38 @@ function findGraphPath(graphs: Record<string, Graph>, targetId: string, currentI
   return null
 }
 
+function findNodeLocation(graphs: Record<string, Graph>, nodeId: string): { graphId: string; node: WordNode } | null {
+  for (const [graphId, graph] of Object.entries(graphs)) {
+    const node = graph.nodes.find(candidate => candidate.id === nodeId)
+    if (node) return { graphId, node }
+  }
+  return null
+}
+
+function resolveGhostNode(node: WordNode, graphs: Record<string, Graph>): WordNode {
+  if (!node.ghostSource) return node
+  const source = graphs[node.ghostSource.graphId]?.nodes.find(candidate => candidate.id === node.ghostSource!.nodeId)
+  if (!source || source.ghostSource) return { ...node, label: '失效引用', note: '', tags: [], links: [], properties: [], hasChildGraph: false }
+  return {
+    ...source,
+    id: node.id,
+    position: node.position,
+    scale: node.scale,
+    positionLocked: node.positionLocked,
+    isContextRoot: false,
+    ghostSource: node.ghostSource,
+    createdAt: node.createdAt,
+  }
+}
+
+function findAnyGraphPath(graphs: Record<string, Graph>, targetId: string): string[] | null {
+  const roots = Object.keys(graphs).filter(id => id === 'root' || id.startsWith('graph:'))
+  for (const rootId of roots) {
+    const path = findGraphPath(graphs, targetId, rootId, new Set())
+    if (path) return path
+  }
+  return null
+}
 function loadStoredGraphs(): Record<string, Graph> {
   const migrate = (graphs: Record<string, Graph>) => {
     const now = new Date().toISOString()
@@ -454,6 +486,7 @@ function Word({ node, degree, mergeCount, selected, hovered, linking, editing, m
         <circleGeometry args={[size, 64]} />
         <meshBasicMaterial color={selected ? (dark ? '#d8bd62' : '#d5b84f') : (dark ? '#ffffff' : '#111318')} transparent opacity={linking ? .085 : selected ? (hovered ? .105 : .072) : hovered ? .045 : .009} depthWrite={false} depthTest={false} />
       </mesh>
+      {node.ghostSource && <group position={[0, -.43, .04]}><mesh renderOrder={11} position={[-.045, 0, 0]}><circleGeometry args={[.022, 18]}/><meshBasicMaterial color={dark ? '#b6bbc2' : '#555a61'} transparent opacity={.58} depthWrite={false} depthTest={false}/></mesh><mesh renderOrder={11} position={[.045, 0, 0]}><circleGeometry args={[.022, 18]}/><meshBasicMaterial color={dark ? '#b6bbc2' : '#555a61'} transparent opacity={.58} depthWrite={false} depthTest={false}/></mesh></group>}
       {node.hasChildGraph && <mesh position={[0, -.43, .03]}><circleGeometry args={[.035, 24]} /><meshBasicMaterial color={selected ? (dark ? '#dfca7a' : '#907323') : (dark ? '#aeb2b8' : '#60646a')} transparent opacity={hovered || selected ? .72 : .42} depthWrite={false} /></mesh>}
       {mergeCount > 1 && <Text position={[.42, .24, .07]} fontSize={.11} color={dark ? '#aeb2b8' : '#686c72'} anchorX="center" anchorY="middle" material-fog={false}>×{mergeCount}</Text>}
       {!editing && <Text key={fontStyle} ref={textRef} font={fontStyle === 'serif' ? '/fonts/NotoSerifSC-Medium.ttf' : '/fonts/NotoSansSC-Medium.ttf'} position={[0, 0, .06]} fontSize={(node.label.length > 4 ? .24 : .31) * fontScale * (fontStyle === 'serif' ? 1.04 : fontStyle === 'compact' ? .97 : 1)} color={node.isContextRoot ? (dark ? '#858b93' : '#92959a') : selected ? (dark ? '#eadfae' : '#66521d') : (dark ? '#f1f2f3' : '#050608')} anchorX="center" anchorY="middle" fontWeight={fontStyle === 'serif' ? 500 : fontStyle === 'compact' ? 680 : selected || hovered ? 700 : 500} letterSpacing={fontStyle === 'serif' ? .035 : fontStyle === 'compact' ? -.035 : 0} material-fog={false} material-depthTest={false} material-depthWrite={false}>{node.label}</Text>}
@@ -858,6 +891,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const [linkMode, setLinkMode] = useState<'off' | 'single' | 'continuous'>('off')
   const [linkSourceIds, setLinkSourceIds] = useState<string[]>([])
   const [duplicateSourceId, setDuplicateSourceId] = useState('')
+  const [ghostClipboard, setGhostClipboard] = useState<{ graphId: string; nodeId: string } | null>(null)
   const [selectedEdge, setSelectedEdge] = useState('')
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set())
   const [sceneFullscreen, setSceneFullscreen] = useState(() => localStorage.getItem('wordverse.sceneFullscreen') === 'true')
@@ -932,7 +966,12 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false, fractionalSecondDigits: 3 })
     setTraceEntries(current => [...current.slice(-199), { time, level, scope, message }])
   }, [])
-  const selected = graph.nodes.find(n => n.id === selectedId) || graph.nodes[0]
+  const selectedInstance = graph.nodes.find(n => n.id === selectedId) || graph.nodes[0]
+  const selected = selectedInstance ? resolveGhostNode(selectedInstance, graphs) : undefined
+  const selectedIsGhost = !!selectedInstance?.ghostSource
+  const ghostSourceAvailable = !!(selectedInstance?.ghostSource && graphs[selectedInstance.ghostSource.graphId]?.nodes.some(node => node.id === selectedInstance.ghostSource!.nodeId))
+  const ghostSourcePathLabel = selectedInstance?.ghostSource ? (findAnyGraphPath(graphs, selectedInstance.ghostSource.graphId)?.map(id => graphs[id]?.name || id).join(' › ') || selectedInstance.ghostSource.graphId) : ''
+  const renderedGraph = useMemo(() => ({ ...graph, nodes: graph.nodes.map(node => resolveGhostNode(node, graphs)) }), [graph, graphs])
   useEffect(() => {
     setSelectedEdge('')
     setSelectedEdges(new Set())
@@ -948,6 +987,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     })
   }, [selectedId, graph.id, graph.nodes])
   useEffect(() => { if (reduceMotion) setPlaybackEnabled(false) }, [reduceMotion])
+  useEffect(() => { if (selectedIsGhost) { setEditingId(''); setEditingPropertyId(''); setExpandedText(null) } }, [selectedId, selectedIsGhost])
   useEffect(() => {
     const describe = (value: unknown) => value instanceof Error ? `${value.name}: ${value.message}` : typeof value === 'string' ? value : (() => { try { return JSON.stringify(value) } catch { return String(value) } })()
     const onError = (event: ErrorEvent) => trace('window', `${event.message} · ${event.filename}:${event.lineno}`, 'error')
@@ -1152,8 +1192,8 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       if (matchesShortcut(event, shortcuts.save)) { event.preventDefault(); saveImmediately(); return }
       if (event.key === 'Escape') { if (imagePreview) setImagePreview(null); else if (expandedText) setExpandedText(null); else if (closeProblem) setCloseProblem(null); else if (helpOpen) setHelpOpen(false); else if (deleteGraphRequest) setDeleteGraphRequest(null); else if (renameGraphRequest) setRenameGraphRequest(null); else if (graphContextMenu) setGraphContextMenu(null); else if (deletePropertyRequest) setDeletePropertyRequest(null); else if (editingPropertyId) setEditingPropertyId(''); else if (propertyTarget) setPropertyTarget(null); else if (editingId) setEditingId(''); else if (linkMode !== 'off' || duplicateSourceId || contextMenu) cancelActiveMode(); else if (selectionMode !== 'single' || gizmoMode) { setSelectionMode('single'); setGizmoMode(null) } else if (draftGraphName !== null) setDraftGraphName(null); else if (!typing) navigateBack() }
       if (!typing && event.key === '?') { event.preventDefault(); setSettingsPage('shortcuts'); setSettingsOpen(true); setHelpOpen(false); setTrashOpen(false) }
-      if (!typing && matchesShortcut(event, shortcuts.rename) && selectedId) { event.preventDefault(); setEditingId(selectedId); setContextMenu(null) }
-      if (!typing && matchesShortcut(event, shortcuts.duplicate) && selectedId) { event.preventDefault(); cancelActiveMode(); setDuplicateSourceId(selectedId); setPlaybackEnabled(false); setSelectedEdge('') }
+      if (!typing && matchesShortcut(event, shortcuts.rename) && selectedId && !selectedIsGhost) { event.preventDefault(); setEditingId(selectedId); setContextMenu(null) }
+      if (!typing && matchesShortcut(event, shortcuts.duplicate) && selectedId && !selectedIsGhost) { event.preventDefault(); cancelActiveMode(); setDuplicateSourceId(selectedId); setPlaybackEnabled(false); setSelectedEdge('') }
       if (!typing && matchesShortcut(event, shortcuts.encapsulate) && selectedIds.size > 1) { event.preventDefault(); cancelActiveMode(); encapsulateSelection() }
       if (!typing && selectedEdge && (matchesShortcut(event, shortcuts.edgeSource) || matchesShortcut(event, shortcuts.edgeTarget))) {
         event.preventDefault()
@@ -1181,9 +1221,9 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       if (matchesShortcut(event, shortcuts.search)) { event.preventDefault(); searchInputRef.current?.focus(); searchInputRef.current?.select() }
     }
     addEventListener('keydown', back); return () => removeEventListener('keydown', back)
-  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedIds, selectedEdge, selectedEdges, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation])
+  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedIds, selectedEdge, selectedEdges, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation, selectedIsGhost])
   const setGraph = (change: (graph: Graph) => Graph) => commitGraphs(all => ({ ...all, [graph.id]: change(all[graph.id] || graph) }))
-  const update = (patch: Partial<WordNode>) => setGraph(g => ({ ...g, nodes: g.nodes.map(n => n.id === selected.id ? { ...n, ...patch, updatedAt: new Date().toISOString() } : n) }))
+  const update = (patch: Partial<WordNode>) => { if (!selected) return; setGraph(g => ({ ...g, nodes: g.nodes.map(n => n.id === selected.id ? { ...n, ...patch, updatedAt: new Date().toISOString() } : n) })) }
   const updatePositionAxis = (axis: number, rawValue: string) => {
     const value = Number(rawValue)
     if (!selected || !Number.isFinite(value)) return
@@ -1192,14 +1232,14 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     update({ position: vector, positionLocked: true })
   }
   const updateScale = (rawValue: string) => { const value = Number(rawValue); if (Number.isFinite(value)) update({ scale: Math.max(.05, Math.min(20, value)) }) }
-  const updateProperty = (definition: PropertyDefinition, value: PropertyValue) => update({ properties: [...(selected.properties || []).filter(item => item.id !== definition.id), { ...definition, value }] })
+  const updateProperty = (definition: PropertyDefinition, value: PropertyValue) => { if (!selected) return; update({ properties: [...(selected.properties || []).filter(item => item.id !== definition.id), { ...definition, value }] }) }
   const addPropertyDefinition = () => {
     const name = propertyName.trim()
     if (!name || !propertyTarget) return
     const definition: PropertyDefinition = { id: crypto.randomUUID(), name, type: propertyType }
     if (propertyTarget === 'global') setGlobalProperties(current => [...current, definition])
     else {
-      update({ properties: [...(selected.properties || []), { ...definition, value: propertyType === 'text-list' ? [] : '' }] })
+      update({ properties: [...(selected?.properties || []), { ...definition, value: propertyType === 'text-list' ? [] : '' }] })
       setEditingPropertyId(definition.id)
     }
     setPropertyName(''); setPropertyType('text'); setPropertyTarget(null)
@@ -1209,7 +1249,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       setGlobalProperties(current => current.filter(item => item.id !== id))
       commitGraphs(current => Object.fromEntries(Object.entries(current).map(([graphId, item]) => [graphId, { ...item, nodes: item.nodes.map(node => ({ ...node, properties: (node.properties || []).filter(property => property.id !== id) })) }])))
     }
-    else update({ properties: (selected.properties || []).filter(item => item.id !== id) })
+    else update({ properties: (selected?.properties || []).filter(item => item.id !== id) })
   }
   const confirmPropertyDelete = () => {
     if (!deletePropertyRequest) return
@@ -1218,6 +1258,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     setEditingPropertyId(''); setDeletePropertyRequest(null)
   }
   const enterGraph = (node: WordNode) => {
+    if (node.ghostSource) { jumpToGhostSource(node); return }
     const id = `child:${node.id}`
     commitGraphs(all => {
       if (!all[id]) return { ...all, [id]: { id, name: node.label, nodes: [{ id: crypto.randomUUID(), label: node.label, note: '当前子词网的上下文词。', tags: [], links: [], position: [0, 0, 0], scale: 1, isContextRoot: true }], edges: [] } }
@@ -1278,6 +1319,24 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     setMergeDuplicates(false); setLinkMode(mode); setLinkSourceIds(sources); setSelectedEdge(''); setSelectedEdges(new Set()); setContextMenu(null)
   }
   const cancelActiveMode = () => { setLinkMode('off'); setLinkSourceIds([]); setDuplicateSourceId(''); setContextMenu(null) }
+  const jumpToNode = (graphId: string, nodeId: string) => {
+    const targetPath = findAnyGraphPath(graphs, graphId)
+    if (!targetPath || !graphs[graphId]?.nodes.some(node => node.id === nodeId)) return
+    const existing = tabs.find(tab => tab.path[0] === targetPath[0])
+    if (existing) {
+      setTabs(current => current.map(tab => tab.id === existing.id ? { ...tab, path: targetPath } : tab))
+      setActiveTabId(existing.id)
+    } else {
+      const id = `tab:${crypto.randomUUID()}`
+      setTabs(current => [...current, { id, path: targetPath }])
+      setActiveTabId(id)
+    }
+    setSelectedIds(new Set([nodeId])); setSelectedId(nodeId); cancelActiveMode()
+    setTimeout(() => setFocusRequest(value => value + 1), 0)
+  }
+  const jumpToGhostSource = (node: WordNode) => {
+    if (node.ghostSource) jumpToNode(node.ghostSource.graphId, node.ghostSource.nodeId)
+  }
   const openGraphTab = (graphId: string) => {
     const existing = tabs.find(tab => tab.path[tab.path.length - 1] === graphId)
     if (existing) { setActiveTabId(existing.id); setSelectedId(''); return }
@@ -1323,17 +1382,18 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   }
   const hierarchyNeedle = hierarchyQuery.trim().toLowerCase()
   const graphContainsHierarchyMatch = (candidate: Graph): boolean => candidate.nodes.some(node => {
-    const selfMatches = node.label.toLowerCase().includes(hierarchyNeedle) || node.tags.some(tag => tag.toLowerCase().includes(hierarchyNeedle))
+    const displayNode = resolveGhostNode(node, graphs)
+    const selfMatches = displayNode.label.toLowerCase().includes(hierarchyNeedle) || displayNode.tags.some(tag => tag.toLowerCase().includes(hierarchyNeedle))
     const child = graphs[`child:${node.id}`]
     return selfMatches || (!!child && graphContainsHierarchyMatch(child))
   })
   const renderHierarchyNodes = (ownerGraph: Graph, depth = 0, nested = false): React.ReactNode => ownerGraph.nodes
     .filter(node => !nested || !node.isContextRoot)
-    .filter(node => !hierarchyNeedle || node.label.toLowerCase().includes(hierarchyNeedle) || node.tags.some(tag => tag.toLowerCase().includes(hierarchyNeedle)) || (!!graphs[`child:${node.id}`] && graphContainsHierarchyMatch(graphs[`child:${node.id}`])))
+    .filter(node => { const displayNode = resolveGhostNode(node, graphs); return !hierarchyNeedle || displayNode.label.toLowerCase().includes(hierarchyNeedle) || displayNode.tags.some(tag => tag.toLowerCase().includes(hierarchyNeedle)) || (!!graphs[`child:${node.id}`] && graphContainsHierarchyMatch(graphs[`child:${node.id}`])) })
     .map(node => {
       const childGraph = graphs[`child:${node.id}`]
       const expanded = expandedNodes.has(node.id)
-      return <div key={`${ownerGraph.id}:${node.id}`} className="hierarchy-branch"><div className={node.id === selectedId && ownerGraph.id === graph.id ? 'tree-item selected' : 'tree-item'} style={{ paddingLeft: `${20 + depth * 14}px` }} onContextMenu={event => { event.preventDefault(); visitHierarchyNode(node, ownerGraph.id, false); setContextMenu({ node, x: event.clientX, y: event.clientY }) }}><button className="tree-expand" aria-label={expanded ? '折叠子词网' : '展开子词网'} disabled={!childGraph} onClick={() => childGraph && toggleHierarchyNode(node.id)}>{childGraph ? <ChevronDown size={12} className={expanded || !!hierarchyNeedle ? '' : 'collapsed'}/> : <span className="node-dot"/>}</button><button className="tree-select" onDoubleClick={() => visitHierarchyNode(node, ownerGraph.id, true)} onClick={() => visitHierarchyNode(node, ownerGraph.id, false)}><span>{node.label}</span></button></div>{childGraph && (expanded || !!hierarchyNeedle) && <div className="tree-children">{renderHierarchyNodes(childGraph, depth + 1, true)}</div>}</div>
+      return <div key={`${ownerGraph.id}:${node.id}`} className="hierarchy-branch"><div className={node.id === selectedId && ownerGraph.id === graph.id ? 'tree-item selected' : 'tree-item'} style={{ paddingLeft: `${20 + depth * 14}px` }} onContextMenu={event => { event.preventDefault(); visitHierarchyNode(node, ownerGraph.id, false); setContextMenu({ node, x: event.clientX, y: event.clientY }) }}><button className="tree-expand" aria-label={expanded ? '折叠子词网' : '展开子词网'} disabled={!childGraph} onClick={() => childGraph && toggleHierarchyNode(node.id)}>{childGraph ? <ChevronDown size={12} className={expanded || !!hierarchyNeedle ? '' : 'collapsed'}/> : <span className="node-dot"/>}</button><button className="tree-select" onDoubleClick={() => visitHierarchyNode(node, ownerGraph.id, true)} onClick={() => visitHierarchyNode(node, ownerGraph.id, false)}><span>{resolveGhostNode(node, graphs).label}</span></button></div>{childGraph && (expanded || !!hierarchyNeedle) && <div className="tree-children">{renderHierarchyNodes(childGraph, depth + 1, true)}</div>}</div>
     })
   const addNode = (label = '新词', requestedPosition?: [number, number, number]) => {
     const id = crypto.randomUUID()
@@ -1345,6 +1405,45 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       const arranged = autoLayout ? relaxLayout(nodes) : nodes
       return { ...g, nodes: arranged.map(item => item.id === id ? { ...item, positionLocked: false } : item) }
     }); setSelectedIds(new Set([id])); setSelectedId(id); setEditingId(id); trace('node', `Created ${id}`)
+  }
+  const copyGhostReference = (node: WordNode) => {
+    const source = node.ghostSource || (() => {
+      const location = findNodeLocation(graphs, node.id)
+      return location ? { graphId: location.graphId, nodeId: node.id } : null
+    })()
+    if (!source) return
+    setGhostClipboard(source); setContextMenu(null)
+    trace('ghost', `Copied reference ${source.graphId}:${source.nodeId}`)
+  }
+  const pasteGhostReference = () => {
+    if (!ghostClipboard) return
+    const source = graphs[ghostClipboard.graphId]?.nodes.find(node => node.id === ghostClipboard.nodeId)
+    if (!source || source.ghostSource) { trace('ghost', 'Source is unavailable', 'warn'); return }
+    const id = crypto.randomUUID()
+    const timestamp = new Date().toISOString()
+    setGraph(current => {
+      const requested = sceneCursorPoint.current || balancedPosition(current.nodes)
+      const position = sceneCursorPoint.current ? nearbyIntentPosition(current.nodes, requested) : requested
+      const ghost: WordNode = {
+        id,
+        label: source.label,
+        note: '',
+        tags: [],
+        links: [],
+        properties: [],
+        position,
+        scale: selected?.scale || source.scale || 1,
+        positionLocked: false,
+        hasChildGraph: false,
+        isContextRoot: false,
+        ghostSource: ghostClipboard,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }
+      return { ...current, nodes: [...current.nodes, ghost] }
+    })
+    setSelectedIds(new Set([id])); setSelectedId(id); setSelectedEdge(''); setSelectedEdges(new Set())
+    trace('ghost', `Pasted reference ${ghostClipboard.graphId}:${ghostClipboard.nodeId}`)
   }
   const duplicateNodeAt = (requestedPosition: [number, number, number]) => {
     const source = graph.nodes.find(node => node.id === duplicateSourceId)
@@ -1371,6 +1470,14 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     })
     setSelectedIds(new Set([id])); setSelectedId(id); setSelectedEdge(''); setDuplicateSourceId(''); setEditingId(id); trace('node', `Duplicated ${source.id} as ${id}`)
   }
+  useEffect(() => {
+    const pasteReference = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'v' || isTextEditing() || !ghostClipboard) return
+      event.preventDefault(); pasteGhostReference()
+    }
+    addEventListener('keydown', pasteReference)
+    return () => removeEventListener('keydown', pasteReference)
+  }, [ghostClipboard, graph.id, graphs, selected?.scale])
   useEffect(() => {
     if (!duplicateSourceId) return
     const confirmPlacement = (event: KeyboardEvent) => {
@@ -1593,7 +1700,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     <main className={`space${consoleOpen ? ' console-visible' : ''}`}>
       <button className="scene-back" aria-label="返回上一级" title="返回上一级（Esc）" disabled={path.length <= 1} onClick={() => { cancelActiveMode(); navigateBack() }}><ArrowLeft size={17}/></button>
       <div className="space-top"><label className="search global"><Search size={16}/><input ref={searchInputRef} value={query} onChange={e => setQuery(e.target.value)} placeholder="检索当前词网（逗号分隔）"/><kbd>⌘ K</kbd></label><button className={mergeDuplicates ? 'soft merge-active' : 'soft'} aria-pressed={mergeDuplicates} onClick={() => { cancelActiveMode(); setMergeDuplicates(value => !value) }}><Link2 size={15}/> 同词合并 <span className="toggle"/></button></div>
-      <div className="canvas" onDoubleClick={() => { if (!sceneFailure && selectionMode === 'single' && linkMode === 'off' && !duplicateSourceId && !isMoving && !editingId && !playbackEnabled) addNode('新词', sceneCursorPoint.current || undefined) }} onContextMenu={event => { event.preventDefault(); setGraphContextMenu(null); if ((linkMode !== 'off' || duplicateSourceId) && !contextMenu) cancelActiveMode() }}>{sceneFailure ? <div className="scene-recovery" role="alert"><Sparkles size={22}/><strong>三维场景暂时不可用</strong><p>显卡上下文已中断，词库数据没有受到影响。</p><button onClick={() => { setSceneGeneration(value => value + 1); setSceneFailure(false) }}>重新启动场景</button></div> : <Canvas key={sceneGeneration} fallback={<div className="scene-recovery"><strong>无法启动三维场景</strong><p>请确认系统 WebView2 和图形加速可用。</p></div>} gl={{ alpha: true }} camera={{ position: [0, 0, 11], fov: 47 }} dpr={graph.nodes.length > 400 ? [0.8, 1.2] : [1, 1.6]}><SceneHealth onContextLost={() => { setPlaybackEnabled(false); setSceneFailure(true) }}/><GraphScene graph={graph} selectedId={selectedId} selectedIds={selectedIds} selectionMode={selectionMode} gizmoMode={gizmoMode} shortcuts={shortcuts} selectedEdge={selectedEdge} selectedEdges={selectedEdges} editingId={editingId} linkMode={linkMode} linkSourceIds={linkSourceIds} duplicateSourceId={duplicateSourceId} isMoving={isMoving} gridVisible={gridVisible} mergeDuplicates={mergeDuplicates} motionEnabled={motionEnabled} playbackEnabled={playbackEnabled} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} lineScale={lineScale} gridDensity={gridDensity} gridClarity={gridClarity} gridRange={gridRange} focusRequest={focusRequest} viewRequest={viewRequest} bringRequest={bringRequest} onBring={bringNodeIntoView} onSelect={activateNode} onSelectMany={selectMany} onSelectEdge={(source, target) => { const key = `${source}:${target}`; setSelectedEdge(key); setSelectedEdges(new Set([key])); setSelectedIds(new Set()); setSelectedId(''); cancelActiveMode() }} onOpen={enterGraph} onContext={(node, x, y) => { setGraphContextMenu(null); setSelectedIds(new Set([node.id])); setSelectedId(node.id); setContextMenu({ node, x, y }) }} onRename={renameNode} onCursorPoint={(position) => { sceneCursorPoint.current = position }} onDuplicateAt={duplicateNodeAt} onMoveStart={() => { setPlaybackEnabled(false); cancelActiveMode(); setIsMoving(true); beginNodeMove() }} onTransformMany={transformNodes} onMoveEnd={finishNodeMove} onFlyChange={setFlyNavigation} query={query}/></Canvas>}</div>
+      <div className="canvas" onDoubleClick={() => { if (!sceneFailure && selectionMode === 'single' && linkMode === 'off' && !duplicateSourceId && !isMoving && !editingId && !playbackEnabled) addNode('新词', sceneCursorPoint.current || undefined) }} onContextMenu={event => { event.preventDefault(); setGraphContextMenu(null); if ((linkMode !== 'off' || duplicateSourceId) && !contextMenu) cancelActiveMode() }}>{sceneFailure ? <div className="scene-recovery" role="alert"><Sparkles size={22}/><strong>三维场景暂时不可用</strong><p>显卡上下文已中断，词库数据没有受到影响。</p><button onClick={() => { setSceneGeneration(value => value + 1); setSceneFailure(false) }}>重新启动场景</button></div> : <Canvas key={sceneGeneration} fallback={<div className="scene-recovery"><strong>无法启动三维场景</strong><p>请确认系统 WebView2 和图形加速可用。</p></div>} gl={{ alpha: true }} camera={{ position: [0, 0, 11], fov: 47 }} dpr={graph.nodes.length > 400 ? [0.8, 1.2] : [1, 1.6]}><SceneHealth onContextLost={() => { setPlaybackEnabled(false); setSceneFailure(true) }}/><GraphScene graph={renderedGraph} selectedId={selectedId} selectedIds={selectedIds} selectionMode={selectionMode} gizmoMode={gizmoMode} shortcuts={shortcuts} selectedEdge={selectedEdge} selectedEdges={selectedEdges} editingId={editingId} linkMode={linkMode} linkSourceIds={linkSourceIds} duplicateSourceId={duplicateSourceId} isMoving={isMoving} gridVisible={gridVisible} mergeDuplicates={mergeDuplicates} motionEnabled={motionEnabled} playbackEnabled={playbackEnabled} motionSpeed={motionSpeed} motionAmplitude={motionAmplitude} dark={dark} fontScale={fontScale} fontStyle={fontStyle} lineScale={lineScale} gridDensity={gridDensity} gridClarity={gridClarity} gridRange={gridRange} focusRequest={focusRequest} viewRequest={viewRequest} bringRequest={bringRequest} onBring={bringNodeIntoView} onSelect={activateNode} onSelectMany={selectMany} onSelectEdge={(source, target) => { const key = `${source}:${target}`; setSelectedEdge(key); setSelectedEdges(new Set([key])); setSelectedIds(new Set()); setSelectedId(''); cancelActiveMode() }} onOpen={enterGraph} onContext={(node, x, y) => { setGraphContextMenu(null); setSelectedIds(new Set([node.id])); setSelectedId(node.id); setContextMenu({ node, x, y }) }} onRename={renameNode} onCursorPoint={(position) => { sceneCursorPoint.current = position }} onDuplicateAt={duplicateNodeAt} onMoveStart={() => { setPlaybackEnabled(false); cancelActiveMode(); setIsMoving(true); beginNodeMove() }} onTransformMany={transformNodes} onMoveEnd={finishNodeMove} onFlyChange={setFlyNavigation} query={query}/></Canvas>}</div>
       <div className="scene-view-gizmo" aria-label="场景视图">
         <button className={`view-cube${lockedView === 'perspective' ? ' locked' : ''}`} title="等距透视（Ctrl 点击锁定）" onClick={event => chooseSceneView('perspective', event.ctrlKey || event.metaKey)}><Axis3d size={17}/></button>
         <div className="view-faces">
@@ -1608,21 +1715,22 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
         <button className={selectionMode === 'box' ? 'active' : ''} title="框选（B）" onClick={() => { cancelActiveMode(); setSelectionMode('box'); setGizmoMode(null) }}><SquareDashedMousePointer size={15}/></button>
         <button className={selectionMode === 'lasso' ? 'active' : ''} title="圈选（C）" onClick={() => { cancelActiveMode(); setSelectionMode('lasso'); setGizmoMode(null) }}><LassoSelect size={15}/></button>
       </div>
-      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkSourceIds.length > 1 ? `批量连接中 · ${linkSourceIds.length} 个起点` : linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSourceIds.length ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动可选择词与连线 · Ctrl/Shift 追加</span></> : (selectedEdges.size || selectedEdge) ? <><strong>已选择 {selectedEdges.size || 1} 条连线</strong><span>&lt; / &gt; 查看端点 · Delete 批量斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Alt+D 复制连接</span><span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
+      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkSourceIds.length > 1 ? `批量连接中 · ${linkSourceIds.length} 个起点` : linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSourceIds.length ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动可选择词与连线 · Ctrl/Shift 追加</span></> : (selectedEdges.size || selectedEdge) ? <><strong>已选择 {selectedEdges.size || 1} 条连线</strong><span>&lt; / &gt; 查看端点 · Delete 批量斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Alt+D 复制连接</span>{ghostClipboard && <span>Ctrl+V 粘贴 Ghost</span>}<span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
       <div className="scene-tools"><button onClick={() => addNode()}><Plus size={18}/></button><button className={linkMode !== 'off' ? 'tool-active' : ''} title="建立连接（L）" onClick={() => linkMode === 'off' ? startLink() : cancelActiveMode()}><Link2 size={17}/></button><button title="聚焦（F）" onClick={() => setFocusRequest(value => value + 1)}><Focus size={18}/></button><button disabled={reduceMotion} className={playbackEnabled ? 'tool-active playback-active' : ''} title={reduceMotion ? '系统已启用“减少动态效果”' : playbackEnabled ? '停止词网漫游' : '播放词网漫游'} onClick={() => { cancelActiveMode(); setPlaybackEnabled(value => !value) }}><Play size={17}/></button><button title="回到当前词网 Home 视野" onClick={() => { setPlaybackEnabled(false); setSelectedIds(new Set()); setSelectedId(''); setFocusRequest(value => value + 1) }}><Home size={17}/></button></div>
       {draftGraphName !== null && <form className="quick-create" onSubmit={event => { event.preventDefault(); if (draftGraphName.trim()) createMainGraph(draftGraphName) }}><span>主词网</span><input autoFocus value={draftGraphName} onChange={event => setDraftGraphName(event.target.value)} placeholder="输入词网名称…"/><kbd>Enter</kbd><button type="button" onClick={() => setDraftGraphName(null)}><X size={14}/></button></form>}
-      {contextMenu && <div className="node-menu" style={{ left: contextMenu.x, top: contextMenu.y }}><button onClick={() => { setEditingId(contextMenu.node.id); setContextMenu(null) }}>重命名 <kbd>F2</kbd></button><button onClick={() => startLink(contextMenu.node.id)}><Link2 size={14}/>建立连接</button><button onClick={() => { setBringRequest({ id: contextMenu.node.id, nonce: Date.now() }); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}><LocateFixed size={14}/>移到当前视野</button><button onClick={() => { enterGraph(contextMenu.node); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}>进入子词网</button></div>}
+      {contextMenu && <div className="node-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>{!contextMenu.node.ghostSource && <button onClick={() => { setEditingId(contextMenu.node.id); setContextMenu(null) }}>重命名 <kbd>F2</kbd></button>}<button onClick={() => copyGhostReference(contextMenu.node)}>复制 Ghost 引用</button><button onClick={() => startLink(contextMenu.node.id)}><Link2 size={14}/>建立连接</button><button onClick={() => { setBringRequest({ id: contextMenu.node.id, nonce: Date.now() }); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}><LocateFixed size={14}/>移到当前视野</button><button onClick={() => { enterGraph(contextMenu.node); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}>{contextMenu.node.ghostSource ? '跳转到初始节点' : '进入子词网'}</button></div>}
       {graphContextMenu && <div className="node-menu graph-file-menu" style={{ left: graphContextMenu.x, top: graphContextMenu.y }}><button onClick={() => { const item = graphs[graphContextMenu.graphId]; setRenameGraphRequest({ graphId: item.id, name: item.name }); setGraphContextMenu(null) }}>重命名</button><button className="danger" disabled={graphContextMenu.graphId === 'root' || Object.keys(graphs).filter(id => id === 'root' || id.startsWith('graph:')).length <= 1} onClick={() => { setDeleteGraphRequest(graphContextMenu.graphId); setGraphContextMenu(null) }}>删除主词网</button></div>}
     </main>
     <aside className="inspector">
       <div className="panel-resizer panel-resizer-left" onPointerDown={event => { event.preventDefault(); setResizingPanel('right') }}/>
       <div className="panel-title"><span>检查器</span><Menu size={16}/></div>
-      {selected ? <><section className="identity"><div className={selected.isContextRoot ? 'avatar context' : 'avatar'}>{selected.label.slice(0, 1)}</div><div><input className="word-name" value={selected.label} onChange={e => update({ label: e.target.value })}/><p>{selected.isContextRoot ? '当前子词网的上下文词' : selected.hasChildGraph ? '包含子词网' : '词眼'}</p></div></section>
+      {selected ? <><section className="identity"><div className={selected.isContextRoot ? 'avatar context' : 'avatar'}>{selected.label.slice(0, 1)}</div><div><input className={`word-name${selectedIsGhost ? ' ghost-readonly' : ''}`} value={selected.label} readOnly={selectedIsGhost} onChange={e => update({ label: e.target.value })}/><p>{selected.isContextRoot ? '当前子词网的上下文词' : selected.hasChildGraph ? '包含子词网' : '词眼'}</p></div></section>
+      {selectedIsGhost && <section className="ghost-reference"><div><strong>Ghost 引用</strong><small>{ghostSourceAvailable ? `只读 · 来自 ${ghostSourcePathLabel}` : '源节点不可用'}</small></div><button disabled={!ghostSourceAvailable} onClick={() => jumpToGhostSource(selectedInstance!)}>跳转到初始节点</button></section>}
       <section className={`transform-section${transformExpanded ? ' expanded' : ''}`}><button className="transform-heading" aria-expanded={transformExpanded} onClick={() => setTransformExpanded(value => !value)}><span><ChevronDown size={12}/><h3>Transform</h3></span><Axis3d size={13}/></button>{transformExpanded && <><div className="transform-row"><span>Position</span><div className="transform-vector">{(['X', 'Y', 'Z'] as const).map((axis, index) => <label key={axis} className={`axis-${axis.toLowerCase()}`}><b>{axis}</b><input type="number" step="0.1" value={Math.round(selected.position[index] * 1000) / 1000} onChange={event => updatePositionAxis(index, event.target.value)}/></label>)}</div></div><div className="transform-row"><span>Scale</span><label className="uniform-scale"><input type="number" step="0.05" min="0.05" max="20" value={Math.round(selected.scale * 1000) / 1000} onChange={event => updateScale(event.target.value)}/></label></div></>}</section>
-      <section className="content-section"><div className="content-heading compact"><button title="添加属性" aria-label="添加属性" onClick={() => { setPropertyType('text'); setPropertyTarget('node') }}><Plus size={14}/></button></div>
-        {!selected.note && visibleProperties.length === 0 && <div className="content-empty">点击 + 添加文本、文本序列或图片</div>}
-        {selected.note && <article className="content-block"><header><span>文本</span><span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span></header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <p><TextWithLinks value={selected.note}/></p>}</article>}
-        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span><span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span></header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <p><TextWithLinks value={value}/></p> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
+      <section className="content-section"><div className="content-heading compact">{!selectedIsGhost && <button title="添加属性" aria-label="添加属性" onClick={() => { setPropertyType('text'); setPropertyTarget('node') }}><Plus size={14}/></button>}</div>
+        {!selected.note && visibleProperties.length === 0 && <div className="content-empty">{selectedIsGhost ? '源节点暂无内容' : '点击 + 添加文本、文本序列或图片'}</div>}
+        {selected.note && <article className="content-block"><header><span>文本</span>{!selectedIsGhost && <span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span>}</header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <p><TextWithLinks value={selected.note}/></p>}</article>}
+        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span>{!selectedIsGhost && <span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span>}</header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <p><TextWithLinks value={value}/></p> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
       </section>
       <div className="inspector-footer"><span>更新于 {formatExactTime(selected.updatedAt)}</span><span>Delete 删除</span></div></> : <div className="empty-inspector">选择一个词查看属性</div>}
     </aside>

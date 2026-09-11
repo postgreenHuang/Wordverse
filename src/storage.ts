@@ -56,6 +56,9 @@ function normalizeNode(value: unknown, fallbackTimestamp: string): WordNode | nu
     ...(typeof node.hasChildGraph === 'boolean' ? { hasChildGraph: node.hasChildGraph } : {}),
     ...(typeof node.isContextRoot === 'boolean' ? { isContextRoot: node.isContextRoot } : {}),
     ...(typeof node.positionLocked === 'boolean' ? { positionLocked: node.positionLocked } : {}),
+    ...(node.ghostSource && typeof node.ghostSource.graphId === 'string' && node.ghostSource.graphId && typeof node.ghostSource.nodeId === 'string' && node.ghostSource.nodeId
+      ? { ghostSource: { graphId: node.ghostSource.graphId, nodeId: node.ghostSource.nodeId } }
+      : {}),
     ...(Array.isArray(node.properties) ? { properties: node.properties.flatMap(property => { const normalized = normalizeProperty(property); return normalized ? [normalized] : [] }) } : {}),
     createdAt: typeof node.createdAt === 'string' ? node.createdAt : fallbackTimestamp,
     updatedAt: typeof node.updatedAt === 'string' ? node.updatedAt : typeof node.createdAt === 'string' ? node.createdAt : fallbackTimestamp,

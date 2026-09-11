@@ -17,6 +17,7 @@ export type WordNode = {
   properties?: WordProperty[]
   createdAt?: string
   updatedAt?: string
+  ghostSource?: { graphId: string; nodeId: string }
 }
 
 export type Edge = { source: string; target: string }
