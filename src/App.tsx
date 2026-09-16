@@ -2,14 +2,14 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Billboard, Grid, Html, Line, OrbitControls, Text, TransformControls } from '@react-three/drei'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { ArrowDown, ArrowLeft, ArrowUp, Axis3d, ChevronDown, CircleHelp, CirclePlus, Command, FileBox, Focus, Folder, Home, LassoSelect, Link2, LocateFixed, Maximize2, Menu, Moon, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Play, Plus, Redo2, Scaling, Search, Settings2, Sparkles, SquareDashedMousePointer, Sun, Trash2, Undo2, X } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
 import { Color, Raycaster, Vector2, Vector3 } from 'three'
 import { initialGraph } from './data'
 import { connectRelations, cutRelations, deleteGraphTree, deleteWord, restoreRelation, restoreWord } from './graphOps'
 import { balancedPosition, nearbyIntentPosition, relaxLayout } from './layout'
 import { pointInPolygon, segmentHitsBox, segmentHitsPolygon } from './selectionGeometry'
 import { parseSearchTerms } from './searchTerms'
-import { insertTabAtSelection } from './textEditing'
+import { insertTabAtSelection, parseMarkdownBlocks } from './textEditing'
 import { CURRENT_SCHEMA_VERSION, parseWorkspaceDocument, portableWorkspaceJson, prepareImportedWorkspaceJson, resolveImageAsset, StorageConflictError, storeImageAsset, workspaceAutoSaveDelay, workspaceStorage, workspaceStorageLabel } from './storage'
 import type { WorkspaceBackup } from './storage'
 import type { Edge, Graph, PropertyDefinition, PropertyType, PropertyValue, WordNode } from './types'
@@ -29,7 +29,38 @@ const SHORTCUT_LABELS: { action: ShortcutAction; label: string }[] = [
   { action: 'selectSingle', label: '取消 Gizmo' }, { action: 'gizmoMove', label: '移动 Gizmo' }, { action: 'gizmoScale', label: '缩放 Gizmo' }, { action: 'selectBox', label: '框选模式' }, { action: 'selectLasso', label: '圈选模式' }, { action: 'encapsulate', label: '封装为子词网' }, { action: 'edgeSource', label: '查看连线起点' }, { action: 'edgeTarget', label: '查看连线终点' }, { action: 'focus', label: '聚焦所选 / 全图' }, { action: 'rename', label: '重命名' }, { action: 'link', label: '建立连接' }, { action: 'linkContinuous', label: '连续连接' }, { action: 'duplicate', label: '复制并连接' }, { action: 'fullscreen', label: '场景全屏' }, { action: 'forward', label: '相机前进' }, { action: 'backward', label: '相机后退' }, { action: 'left', label: '相机左移' }, { action: 'right', label: '相机右移' }, { action: 'up', label: '相机上移' }, { action: 'down', label: '相机下移' }, { action: 'remove', label: '删除所选' }, { action: 'undo', label: '撤销' }, { action: 'redo', label: '重做' }, { action: 'save', label: '保存' }, { action: 'search', label: '检索' }
 ]
 type CameraSnapshot = { position: [number, number, number]; target: [number, number, number]; up: [number, number, number] }
+type NodeClipboard = { nodes: WordNode[]; edges: Edge[] }
+function useStableInputSelection(value: string) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const selectionRef = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null)
+  const rememberSelection = (event: ChangeEvent<HTMLInputElement>) => {
+    selectionRef.current = {
+      start: event.currentTarget.selectionStart ?? event.currentTarget.value.length,
+      end: event.currentTarget.selectionEnd ?? event.currentTarget.value.length,
+      direction: event.currentTarget.selectionDirection ?? 'none',
+    }
+  }
+  useLayoutEffect(() => {
+    const input = inputRef.current
+    const selection = selectionRef.current
+    if (!input || !selection || document.activeElement !== input) return
+    input.setSelectionRange(Math.min(selection.start, value.length), Math.min(selection.end, value.length), selection.direction)
+  }, [value])
+  return { inputRef, rememberSelection }
+}
 
+function nodeDescendantStats(nodeId: string, graphs: Record<string, Graph>, visited = new Set<string>()): { childCount: number; maxDepth: number } {
+  if (visited.has(nodeId)) return { childCount: 0, maxDepth: 0 }
+  const childGraph = graphs[`child:${nodeId}`]
+  if (!childGraph) return { childCount: 0, maxDepth: 0 }
+  const children = childGraph.nodes.filter(node => !node.isContextRoot)
+  if (!children.length) return { childCount: 0, maxDepth: 0 }
+  const nextVisited = new Set(visited).add(nodeId)
+  return {
+    childCount: children.length,
+    maxDepth: 1 + Math.max(...children.map(node => nodeDescendantStats(node.ghostSource?.nodeId || node.id, graphs, nextVisited).maxDepth)),
+  }
+}
 function loadCameraSnapshots(): Map<string, CameraSnapshot> {
   try {
     const parsed = JSON.parse(localStorage.getItem(projectDeviceKey('cameraSnapshots')) || '{}') as Record<string, CameraSnapshot>
@@ -437,11 +468,27 @@ function TextWithLinks({ value }: { value: string }) {
   return <>{parts}</>
 }
 
+function InlineMarkdown({ value }: { value: string }) {
+  return <>{value.split(/(`[^`\n]+`)/g).filter(Boolean).map((part, index) => part.startsWith('`') && part.endsWith('`')
+    ? <code key={index}>{part.slice(1, -1)}</code>
+    : <TextWithLinks key={index} value={part}/>)}</>
+}
+
+function MarkdownText({ value }: { value: string }) {
+  const blocks = useMemo(() => parseMarkdownBlocks(value), [value])
+  return <div className="markdown-text">{blocks.map((block, blockIndex) => block.type === 'table'
+    ? <div className="markdown-table-scroll" key={blockIndex} tabIndex={0}>
+        <table><thead><tr>{block.header.map((cell, index) => <th key={index}><InlineMarkdown value={cell}/></th>)}</tr></thead>
+        <tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}><InlineMarkdown value={cell}/></td>)}</tr>)}</tbody></table>
+      </div>
+    : block.value && <p key={blockIndex}><InlineMarkdown value={block.value}/></p>)}</div>
+}
 function Word({ node, degree, mergeCount, selected, hovered, linking, editing, motionEnabled, playbackFocused, reduceMotion, motionSpeed, motionAmplitude, dark, fontScale, fontStyle, onSelect, onEnter, onLeave, onOpen, onContext, onRename }: { node: WordNode; degree: number; mergeCount: number; selected: boolean; hovered: boolean; linking: boolean; editing: boolean; motionEnabled: boolean; playbackFocused: boolean; reduceMotion: boolean; motionSpeed: number; motionAmplitude: number; dark: boolean; fontScale: number; fontStyle: FontStyle; onSelect: (additive: boolean) => void; onEnter: () => void; onLeave: () => void; onOpen: () => void; onContext: (x: number, y: number) => void; onRename: (label: string | null) => void }) {
   const size = .5 + Math.min(degree, 5) * .055
   const textRef = useRef<any>(null)
   const groupRef = useRef<any>(null)
   const [renameDraft, setRenameDraft] = useState(node.label)
+  const { inputRef: renameInputRef, rememberSelection: rememberRenameSelection } = useStableInputSelection(renameDraft)
   const emergenceStarted = useRef(0)
   useEffect(() => { if (editing) setRenameDraft(node.label) }, [editing, node.label])
   useEffect(() => { if (playbackFocused) emergenceStarted.current = performance.now() }, [playbackFocused])
@@ -490,7 +537,7 @@ function Word({ node, degree, mergeCount, selected, hovered, linking, editing, m
       {node.hasChildGraph && <mesh position={[0, -.43, .03]}><circleGeometry args={[.035, 24]} /><meshBasicMaterial color={selected ? (dark ? '#dfca7a' : '#907323') : (dark ? '#aeb2b8' : '#60646a')} transparent opacity={hovered || selected ? .72 : .42} depthWrite={false} /></mesh>}
       {mergeCount > 1 && <Text position={[.42, .24, .07]} fontSize={.11} color={dark ? '#aeb2b8' : '#686c72'} anchorX="center" anchorY="middle" material-fog={false}>×{mergeCount}</Text>}
       {!editing && <Text key={fontStyle} ref={textRef} font={fontStyle === 'serif' ? '/fonts/NotoSerifSC-Medium.ttf' : '/fonts/NotoSansSC-Medium.ttf'} position={[0, 0, .06]} fontSize={(node.label.length > 4 ? .24 : .31) * fontScale * (fontStyle === 'serif' ? 1.04 : fontStyle === 'compact' ? .97 : 1)} color={node.isContextRoot ? (dark ? '#858b93' : '#92959a') : selected ? (dark ? '#eadfae' : '#66521d') : (dark ? '#f1f2f3' : '#050608')} anchorX="center" anchorY="middle" fontWeight={fontStyle === 'serif' ? 500 : fontStyle === 'compact' ? 680 : selected || hovered ? 700 : 500} letterSpacing={fontStyle === 'serif' ? .035 : fontStyle === 'compact' ? -.035 : 0} material-fog={false} material-depthTest={false} material-depthWrite={false}>{node.label}</Text>}
-      {editing && <Html center position={[0, 0, .12]} zIndexRange={[20, 10]}><input className="scene-rename" autoFocus value={renameDraft} onChange={event => setRenameDraft(event.target.value)} onFocus={event => event.currentTarget.select()} onPointerDown={event => event.stopPropagation()} onDoubleClick={event => { event.stopPropagation(); onRename(renameDraft) }} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Enter') onRename(renameDraft); if (event.key === 'Escape') onRename(null) }} onBlur={() => onRename(renameDraft)} /></Html>}
+      {editing && <Html center position={[0, 0, .12]} zIndexRange={[20, 10]}><input ref={renameInputRef} className="scene-rename" autoFocus value={renameDraft} onChange={event => { rememberRenameSelection(event); setRenameDraft(event.target.value) }} onFocus={event => event.currentTarget.select()} onPointerDown={event => event.stopPropagation()} onDoubleClick={event => { event.stopPropagation(); onRename(renameDraft) }} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Enter') onRename(renameDraft); if (event.key === 'Escape') onRename(null) }} onBlur={() => onRename(renameDraft)} /></Html>}
     </group>
   </Billboard>
 }
@@ -893,6 +940,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const [linkSourceIds, setLinkSourceIds] = useState<string[]>([])
   const [duplicateSourceId, setDuplicateSourceId] = useState('')
   const [ghostClipboard, setGhostClipboard] = useState<{ graphId: string; nodeId: string } | null>(null)
+  const [nodeClipboard, setNodeClipboard] = useState<NodeClipboard | null>(null)
   const [selectedEdge, setSelectedEdge] = useState('')
   const [selectedEdges, setSelectedEdges] = useState<Set<string>>(new Set())
   const [sceneFullscreen, setSceneFullscreen] = useState(() => localStorage.getItem('wordverse.sceneFullscreen') === 'true')
@@ -970,6 +1018,10 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   }, [])
   const selectedInstance = graph.nodes.find(n => n.id === selectedId) || graph.nodes[0]
   const selected = selectedInstance ? resolveGhostNode(selectedInstance, graphs) : undefined
+  const selectedLabel = selected?.label || ''
+  const { inputRef: inspectorNameInputRef, rememberSelection: rememberInspectorNameSelection } = useStableInputSelection(selectedLabel)
+  const structureNodeId = selectedInstance?.ghostSource?.nodeId || selectedInstance?.id || ''
+  const selectedStructure = nodeDescendantStats(structureNodeId, graphs)
   const selectedIsGhost = !!selectedInstance?.ghostSource
   const ghostSourceAvailable = !!(selectedInstance?.ghostSource && graphs[selectedInstance.ghostSource.graphId]?.nodes.some(node => node.id === selectedInstance.ghostSource!.nodeId))
   const ghostSourcePathLabel = selectedInstance?.ghostSource ? (findAnyGraphPath(graphs, selectedInstance.ghostSource.graphId)?.map(id => graphs[id]?.name || id).join(' › ') || selectedInstance.ghostSource.graphId) : ''
@@ -1043,19 +1095,15 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     })
   }, [graphs, globalProperties])
   const saveImmediately = useCallback(() => {
-    if (!storageReady) return
+    if (!storageReady) return false
     if (saveTimer.current !== null) { window.clearTimeout(saveTimer.current); saveTimer.current = null }
     queueWorkspaceSave(++saveGeneration.current)
+    return true
   }, [queueWorkspaceSave, storageReady])
-  const forceCloseApp = async () => {
-    if (!('__TAURI_INTERNALS__' in window)) { setCloseProblem(null); return }
-    try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      await getCurrentWindow().destroy()
-    } catch { setCloseProblem('close-error') }
-  }
+  const saveImmediatelyRef = useRef(saveImmediately)
+  useLayoutEffect(() => { saveImmediatelyRef.current = saveImmediately }, [saveImmediately])
   useEffect(() => {
-    const flushWhenHidden = () => { if (document.visibilityState === 'hidden') saveImmediately() }
+    const flushWhenHidden = () => { if (document.visibilityState === 'hidden') saveImmediatelyRef.current() }
     document.addEventListener('visibilitychange', flushWhenHidden)
     let disposed = false
     let unlisten: (() => void) | undefined
@@ -1067,7 +1115,11 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
           event.preventDefault()
           if (closeAttempt.current) return
           closeAttempt.current = true
-          saveImmediately()
+          if (!saveImmediatelyRef.current()) {
+            closeAttempt.current = false
+            setCloseProblem('save-error')
+            return
+          }
           const outcome = await Promise.race([
             saveQueue.current.then(() => 'settled' as const),
             new Promise<'timeout'>(resolve => window.setTimeout(() => resolve('timeout'), 4000))
@@ -1082,7 +1134,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       }).catch(() => undefined)
     }
     return () => { disposed = true; unlisten?.(); document.removeEventListener('visibilitychange', flushWhenHidden) }
-  }, [saveImmediately])
+  }, [])
   useEffect(() => {
     if (!storageReady) return
     const generation = ++saveGeneration.current
@@ -1193,6 +1245,9 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       if (recordingShortcut) return
       if (matchesShortcut(event, shortcuts.save)) { event.preventDefault(); saveImmediately(); return }
       if (event.key === 'Escape') { if (imagePreview) setImagePreview(null); else if (expandedText) setExpandedText(null); else if (closeProblem) setCloseProblem(null); else if (helpOpen) setHelpOpen(false); else if (deleteGraphRequest) setDeleteGraphRequest(null); else if (renameGraphRequest) setRenameGraphRequest(null); else if (graphContextMenu) setGraphContextMenu(null); else if (deletePropertyRequest) setDeletePropertyRequest(null); else if (editingPropertyId) setEditingPropertyId(''); else if (propertyTarget) setPropertyTarget(null); else if (editingId) setEditingId(''); else if (linkMode !== 'off' || duplicateSourceId || contextMenu) cancelActiveMode(); else if (selectionMode !== 'single' || gizmoMode) { setSelectionMode('single'); setGizmoMode(null) } else if (draftGraphName !== null) setDraftGraphName(null); else if (!typing) navigateBack() }
+      if (!typing && (event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyC') { event.preventDefault(); copyNodes(); return }
+      if (!typing && (event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyX') { event.preventDefault(); cutNodes(); return }
+      if (!typing && (event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyV' && nodeClipboard) { event.preventDefault(); pasteNodes(); return }
       if (!typing && event.key === '?') { event.preventDefault(); setSettingsPage('shortcuts'); setSettingsOpen(true); setHelpOpen(false); setTrashOpen(false) }
       if (!typing && matchesShortcut(event, shortcuts.rename) && selectedId && !selectedIsGhost) { event.preventDefault(); setEditingId(selectedId); setContextMenu(null) }
       if (!typing && matchesShortcut(event, shortcuts.duplicate) && selectedId && !selectedIsGhost) { event.preventDefault(); cancelActiveMode(); setDuplicateSourceId(selectedId); setPlaybackEnabled(false); setSelectedEdge('') }
@@ -1223,7 +1278,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       if (matchesShortcut(event, shortcuts.search)) { event.preventDefault(); searchInputRef.current?.focus(); searchInputRef.current?.select() }
     }
     addEventListener('keydown', back); return () => removeEventListener('keydown', back)
-  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedIds, selectedEdge, selectedEdges, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation, selectedIsGhost])
+  }, [editingId, editingPropertyId, imagePreview, expandedText, propertyTarget, deletePropertyRequest, deleteGraphRequest, renameGraphRequest, graphContextMenu, draftGraphName, helpOpen, closeProblem, linkMode, duplicateSourceId, selectedId, selectedIds, selectedEdge, selectedEdges, contextMenu, graph, saveImmediately, shortcuts, recordingShortcut, selectionMode, gizmoMode, flyNavigation, selectedIsGhost, nodeClipboard])
   const setGraph = (change: (graph: Graph) => Graph) => commitGraphs(all => ({ ...all, [graph.id]: change(all[graph.id] || graph) }))
   const update = (patch: Partial<WordNode>) => { if (!selected) return; setGraph(g => ({ ...g, nodes: g.nodes.map(n => n.id === selected.id ? { ...n, ...patch, updatedAt: new Date().toISOString() } : n) })) }
   const updatePositionAxis = (axis: number, rawValue: string) => {
@@ -1260,7 +1315,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     setEditingPropertyId(''); setDeletePropertyRequest(null)
   }
   const enterGraph = (node: WordNode) => {
-    if (node.ghostSource) { jumpToGhostSource(node); return }
+    if (node.ghostSource) { enterGhostSourceGraph(node); return }
     const id = `child:${node.id}`
     commitGraphs(all => {
       if (!all[id]) return { ...all, [id]: { id, name: node.label, nodes: [{ id: crypto.randomUUID(), label: node.label, note: '当前子词网的上下文词。', tags: [], links: [], position: [0, 0, 0], scale: 1, isContextRoot: true }], edges: [] } }
@@ -1339,6 +1394,34 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const jumpToGhostSource = (node: WordNode) => {
     if (node.ghostSource) jumpToNode(node.ghostSource.graphId, node.ghostSource.nodeId)
   }
+  const enterGhostSourceGraph = (node: WordNode) => {
+    if (!node.ghostSource) return
+    const { graphId, nodeId } = node.ghostSource
+    const sourceGraph = graphs[graphId]
+    const source = sourceGraph?.nodes.find(candidate => candidate.id === nodeId)
+    const sourcePath = findAnyGraphPath(graphs, graphId)
+    if (!sourceGraph || !source || !sourcePath || source.isContextRoot) return
+    const childId = `child:${nodeId}`
+    commitGraphs(current => ({
+      ...current,
+      [graphId]: { ...current[graphId], nodes: current[graphId].nodes.map(candidate => candidate.id === nodeId ? { ...candidate, hasChildGraph: true, updatedAt: new Date().toISOString() } : candidate) },
+      [childId]: current[childId] || { id: childId, name: source.label, nodes: [{ id: crypto.randomUUID(), label: source.label, note: '当前子词网的上下文词。', tags: [], links: [], position: [0, 0, 0], scale: 1, isContextRoot: true, hasChildGraph: false }], edges: [] },
+    }))
+    const destinationPath = [...sourcePath, childId]
+    const existing = tabs.find(tab => tab.path[0] === sourcePath[0])
+    if (existing) {
+      setTabs(current => current.map(tab => tab.id === existing.id ? { ...tab, path: destinationPath } : tab))
+      setActiveTabId(existing.id)
+    } else {
+      const tabId = `tab:${crypto.randomUUID()}`
+      setTabs(current => [...current, { id: tabId, path: destinationPath }])
+      setActiveTabId(tabId)
+    }
+    setSelectedIds(new Set())
+    setSelectedId('')
+    cancelActiveMode()
+    trace('ghost', `Entered source child graph ${childId}`)
+  }
   const openGraphTab = (graphId: string) => {
     const existing = tabs.find(tab => tab.path[tab.path.length - 1] === graphId)
     if (existing) { setActiveTabId(existing.id); setSelectedId(''); return }
@@ -1407,6 +1490,62 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       const arranged = autoLayout ? relaxLayout(nodes) : nodes
       return { ...g, nodes: arranged.map(item => item.id === id ? { ...item, positionLocked: false } : item) }
     }); setSelectedIds(new Set([id])); setSelectedId(id); setEditingId(id); trace('node', `Created ${id}`)
+  }
+  const copyNodes = (ids = [...selectedIds]) => {
+    const copiedIds = new Set(ids)
+    const nodes = graph.nodes.filter(node => copiedIds.has(node.id) && !node.isContextRoot)
+    if (!nodes.length) return false
+    const snapshot = JSON.parse(JSON.stringify({
+      nodes,
+      edges: graph.edges.filter(edge => copiedIds.has(edge.source) && copiedIds.has(edge.target)),
+    })) as NodeClipboard
+    setNodeClipboard(snapshot)
+    setContextMenu(null)
+    trace('clipboard', `Copied ${nodes.length} node(s)`)
+    return true
+  }
+  const cutNodes = () => {
+    const requested = graph.nodes.filter(node => selectedIds.has(node.id) && !node.isContextRoot).map(node => node.id)
+    const removable = requested.slice(0, Math.max(0, graph.nodes.length - 1))
+    if (!removable.length || !copyNodes(removable)) return
+    const removed = new Set(removable)
+    const timestamp = new Date().toISOString()
+    setGraph(current => removable.reduce((next, id) => deleteWord(next, id, timestamp), current))
+    const next = graph.nodes.find(node => !removed.has(node.id))?.id || ''
+    setSelectedIds(next ? new Set([next]) : new Set())
+    setSelectedId(next)
+    setSelectedEdge('')
+    setSelectedEdges(new Set())
+    trace('clipboard', `Cut ${removable.length} node(s)`)
+  }
+  const pasteNodes = () => {
+    if (!nodeClipboard?.nodes.length) return
+    const idMap = new Map(nodeClipboard.nodes.map(node => [node.id, crypto.randomUUID()]))
+    const centroid = nodeClipboard.nodes.reduce<[number, number, number]>((sum, node) => [sum[0] + node.position[0], sum[1] + node.position[1], sum[2] + node.position[2]], [0, 0, 0]).map(value => value / nodeClipboard.nodes.length) as [number, number, number]
+    const requested = sceneCursorPoint.current
+    const target = requested ? nearbyIntentPosition(graph.nodes, requested) : balancedPosition(graph.nodes)
+    const timestamp = new Date().toISOString()
+    const pasted = nodeClipboard.nodes.map(node => ({
+      ...JSON.parse(JSON.stringify(node)),
+      id: idMap.get(node.id)!,
+      position: [node.position[0] - centroid[0] + target[0], node.position[1] - centroid[1] + target[1], node.position[2] - centroid[2] + target[2]] as [number, number, number],
+      positionLocked: true,
+      isContextRoot: false,
+      hasChildGraph: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }))
+    const pastedEdges = nodeClipboard.edges.map(edge => ({ source: idMap.get(edge.source)!, target: idMap.get(edge.target)! }))
+    setGraph(current => ({ ...current, nodes: [...current.nodes, ...pasted], edges: [...current.edges, ...pastedEdges] }))
+    const pastedIds = new Set(pasted.map(node => node.id))
+    setSelectedIds(pastedIds)
+    setSelectedId(pasted.at(-1)?.id || '')
+    setSelectedEdge('')
+    setSelectedEdges(new Set())
+    setSceneContextMenu(null)
+    setSelectionMode('single')
+    setGizmoMode('translate')
+    trace('clipboard', `Pasted ${pasted.length} node(s)`)
   }
   const copyGhostReference = (node: WordNode) => {
     const source = node.ghostSource || (() => {
@@ -1709,33 +1848,33 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
         <button className={selectionMode === 'box' ? 'active' : ''} title="框选（B）" onClick={() => { cancelActiveMode(); setSelectionMode('box'); setGizmoMode(null) }}><SquareDashedMousePointer size={15}/></button>
         <button className={selectionMode === 'lasso' ? 'active' : ''} title="圈选（C）" onClick={() => { cancelActiveMode(); setSelectionMode('lasso'); setGizmoMode(null) }}><LassoSelect size={15}/></button>
       </div>
-      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkSourceIds.length > 1 ? `批量连接中 · ${linkSourceIds.length} 个起点` : linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSourceIds.length ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动可选择词与连线 · Ctrl/Shift 追加</span></> : (selectedEdges.size || selectedEdge) ? <><strong>已选择 {selectedEdges.size || 1} 条连线</strong><span>&lt; / &gt; 查看端点 · Delete 批量斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Alt+D 复制连接</span>{ghostClipboard && <span>右键空白处粘贴 Ghost</span>}<span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
+      <div className="scene-hint">{duplicateSourceId ? <><strong>复制放置中</strong><span>双击当前位置或 Enter 确认 · Esc 取消</span></> : linkMode !== 'off' ? <><strong>{linkSourceIds.length > 1 ? `批量连接中 · ${linkSourceIds.length} 个起点` : linkMode === 'continuous' ? '连续连接中' : '连接中'}</strong><span>{linkSourceIds.length ? '点击目标词 · Esc 取消' : '点击起点词 · Esc 取消'}</span></> : selectionMode !== 'single' ? <><strong>{selectionMode === 'box' ? '框选模式' : '圈选模式'}</strong><span>拖动可选择词与连线 · Ctrl/Shift 追加</span></> : (selectedEdges.size || selectedEdge) ? <><strong>已选择 {selectedEdges.size || 1} 条连线</strong><span>&lt; / &gt; 查看端点 · Delete 批量斩断</span></> : <><span>R 取消 · T 移动 · Y 缩放</span>{selectedIds.size > 1 && <span>Shift+C 封装子词网</span>}<span>L 连接 · Shift+L 连续</span><span>Ctrl+C/X/V 复制、剪切、粘贴</span><span>Alt+D 复制连接</span>{ghostClipboard && <span>右键空白处粘贴 Ghost</span>}<span>双击词进入 · Esc 返回</span><span>左键+WASD/QE 游走</span><span>Space {sceneFullscreen ? '退出全屏' : '场景全屏'}</span></>}</div>
       <div className="scene-tools"><button onClick={() => addNode()}><Plus size={18}/></button><button className={linkMode !== 'off' ? 'tool-active' : ''} title="建立连接（L）" onClick={() => linkMode === 'off' ? startLink() : cancelActiveMode()}><Link2 size={17}/></button><button title="聚焦（F）" onClick={() => setFocusRequest(value => value + 1)}><Focus size={18}/></button><button disabled={reduceMotion} className={playbackEnabled ? 'tool-active playback-active' : ''} title={reduceMotion ? '系统已启用“减少动态效果”' : playbackEnabled ? '停止词网漫游' : '播放词网漫游'} onClick={() => { cancelActiveMode(); setPlaybackEnabled(value => !value) }}><Play size={17}/></button><button title="回到当前词网 Home 视野" onClick={() => { setPlaybackEnabled(false); setSelectedIds(new Set()); setSelectedId(''); setFocusRequest(value => value + 1) }}><Home size={17}/></button></div>
       {draftGraphName !== null && <form className="quick-create" onSubmit={event => { event.preventDefault(); if (draftGraphName.trim()) createMainGraph(draftGraphName) }}><span>主词网</span><input autoFocus value={draftGraphName} onChange={event => setDraftGraphName(event.target.value)} placeholder="输入词网名称…"/><kbd>Enter</kbd><button type="button" onClick={() => setDraftGraphName(null)}><X size={14}/></button></form>}
-      {contextMenu && <div className="node-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>{!contextMenu.node.ghostSource && <button onClick={() => { setEditingId(contextMenu.node.id); setContextMenu(null) }}>重命名 <kbd>F2</kbd></button>}<button onClick={() => copyGhostReference(contextMenu.node)}>复制 Ghost 引用</button><button onClick={() => startLink(contextMenu.node.id)}><Link2 size={14}/>建立连接</button><button onClick={() => { setBringRequest({ id: contextMenu.node.id, nonce: Date.now() }); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}><LocateFixed size={14}/>移到当前视野</button><button onClick={() => { enterGraph(contextMenu.node); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}>{contextMenu.node.ghostSource ? '跳转到初始节点' : '进入子词网'}</button></div>}
-      {sceneContextMenu && <div className="node-menu scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }}><button disabled={!ghostClipboard} onClick={() => { pasteGhostReference(); setSceneContextMenu(null) }}>{ghostClipboard ? '粘贴 Ghost 引用' : '尚未复制 Ghost 引用'}</button></div>}
+      {contextMenu && <div className="node-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>{!contextMenu.node.ghostSource && <button onClick={() => { setEditingId(contextMenu.node.id); setContextMenu(null) }}>重命名 <kbd>F2</kbd></button>}<button onClick={() => copyNodes()}>复制节点 <kbd>Ctrl+C</kbd></button><button onClick={() => copyGhostReference(contextMenu.node)}>复制 Ghost 引用</button><button onClick={() => startLink(contextMenu.node.id)}><Link2 size={14}/>建立连接</button><button onClick={() => { setBringRequest({ id: contextMenu.node.id, nonce: Date.now() }); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}><LocateFixed size={14}/>移到当前视野</button><button onClick={() => { enterGraph(contextMenu.node); setContextMenu(null) }} disabled={contextMenu.node.isContextRoot}>{contextMenu.node.ghostSource ? '进入原始节点内部' : '进入子词网'}</button></div>}
+      {sceneContextMenu && <div className="node-menu scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }}><button disabled={!nodeClipboard} onClick={pasteNodes}>{nodeClipboard ? '粘贴节点' : '尚未复制节点'} <kbd>Ctrl+V</kbd></button><button disabled={!ghostClipboard} onClick={() => { pasteGhostReference(); setSceneContextMenu(null) }}>{ghostClipboard ? '粘贴 Ghost 引用' : '尚未复制 Ghost 引用'}</button></div>}
       {graphContextMenu && <div className="node-menu graph-file-menu" style={{ left: graphContextMenu.x, top: graphContextMenu.y }}><button onClick={() => { const item = graphs[graphContextMenu.graphId]; setRenameGraphRequest({ graphId: item.id, name: item.name }); setGraphContextMenu(null) }}>重命名</button><button className="danger" disabled={graphContextMenu.graphId === 'root' || Object.keys(graphs).filter(id => id === 'root' || id.startsWith('graph:')).length <= 1} onClick={() => { setDeleteGraphRequest(graphContextMenu.graphId); setGraphContextMenu(null) }}>删除主词网</button></div>}
     </main>
     <aside className="inspector">
       <div className="panel-resizer panel-resizer-left" onPointerDown={event => { event.preventDefault(); setResizingPanel('right') }}/>
       <div className="panel-title"><span>检查器</span><Menu size={16}/></div>
-      {selected ? <><section className="identity"><div className={selected.isContextRoot ? 'avatar context' : 'avatar'}>{selected.label.slice(0, 1)}</div><div><input className={`word-name${selectedIsGhost ? ' ghost-readonly' : ''}`} value={selected.label} readOnly={selectedIsGhost} onChange={e => update({ label: e.target.value })}/><p>{selected.isContextRoot ? '当前子词网的上下文词' : selected.hasChildGraph ? '包含子词网' : '词眼'}</p></div></section>
+      {selected ? <><section className="identity"><div className={selected.isContextRoot ? 'avatar context' : 'avatar'}>{selected.label.slice(0, 1)}</div><div><input ref={inspectorNameInputRef} className={`word-name${selectedIsGhost ? ' ghost-readonly' : ''}`} value={selected.label} readOnly={selectedIsGhost} onChange={e => { rememberInspectorNameSelection(e); update({ label: e.target.value }) }}/><p>{selected.isContextRoot ? '当前子词网的上下文词' : selected.hasChildGraph ? '包含子词网' : '词眼'}</p><div className="identity-stats"><span>直属子节点 <b>{selectedStructure.childCount}</b></span><span>最深层数 <b>{selectedStructure.maxDepth}</b></span></div></div></section>
       {selectedIsGhost && <section className="ghost-reference"><div><strong>Ghost 引用</strong><small>{ghostSourceAvailable ? `只读 · 来自 ${ghostSourcePathLabel}` : '源节点不可用'}</small></div><button disabled={!ghostSourceAvailable} onClick={() => jumpToGhostSource(selectedInstance!)}>跳转到初始节点</button></section>}
       <section className={`transform-section${transformExpanded ? ' expanded' : ''}`}><button className="transform-heading" aria-expanded={transformExpanded} onClick={() => setTransformExpanded(value => !value)}><span><ChevronDown size={12}/><h3>Transform</h3></span><Axis3d size={13}/></button>{transformExpanded && <><div className="transform-row"><span>Position</span><div className="transform-vector">{(['X', 'Y', 'Z'] as const).map((axis, index) => <label key={axis} className={`axis-${axis.toLowerCase()}`}><b>{axis}</b><input type="number" step="0.1" value={Math.round(selected.position[index] * 1000) / 1000} onChange={event => updatePositionAxis(index, event.target.value)}/></label>)}</div></div><div className="transform-row"><span>Scale</span><label className="uniform-scale"><input type="number" step="0.05" min="0.05" max="20" value={Math.round(selected.scale * 1000) / 1000} onChange={event => updateScale(event.target.value)}/></label></div></>}</section>
       <section className="content-section"><div className="content-heading compact">{!selectedIsGhost && <button title="添加属性" aria-label="添加属性" onClick={() => { setPropertyType('text'); setPropertyTarget('node') }}><Plus size={14}/></button>}</div>
         {!selected.note && visibleProperties.length === 0 && <div className="content-empty">{selectedIsGhost ? '源节点暂无内容' : '点击 + 添加文本、文本序列或图片'}</div>}
-        {selected.note && <article className="content-block"><header><span>文本</span>{!selectedIsGhost && <span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span>}</header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <p><TextWithLinks value={selected.note}/></p>}</article>}
-        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span>{!selectedIsGhost && <span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span>}</header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <p><TextWithLinks value={value}/></p> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
+        {selected.note && <article className="content-block"><header><span>文本</span>{!selectedIsGhost && <span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span>}</header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <MarkdownText value={selected.note}/>}</article>}
+        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span>{!selectedIsGhost && <span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span>}</header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <MarkdownText value={value}/> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
       </section>
       <div className="inspector-footer"><span>更新于 {formatExactTime(selected.updatedAt)}</span><span>Delete 删除</span></div></> : <div className="empty-inspector">选择一个词查看属性</div>}
     </aside>
     {imagePreview && <div className="property-dialog-backdrop media-backdrop" onPointerDown={() => setImagePreview(null)}><section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label={`${imagePreview.alt}大图预览`} onPointerDown={event => event.stopPropagation()}><header><strong>{imagePreview.alt}</strong><button aria-label="关闭大图" onClick={() => setImagePreview(null)}><X size={16}/></button></header><div><StoredImage value={imagePreview.value} alt={imagePreview.alt}/></div></section></div>}
-    {expandedText && <div className="property-dialog-backdrop text-editor-backdrop" onPointerDown={() => setExpandedText(null)}><section className="expanded-text-dialog" role="dialog" aria-modal="true" aria-label={`${expandedText.name}编辑器`} onPointerDown={event => event.stopPropagation()}><header><div><strong>{expandedText.name}</strong><small>专注编辑</small></div><button aria-label="关闭编辑器" onClick={() => setExpandedText(null)}><X size={16}/></button></header><div className="expanded-text-workspace"><label><span>文本</span><textarea autoFocus value={expandedTextValue} onChange={event => updateExpandedText(event.target.value)} onKeyDown={event => { if (event.key !== 'Tab') return; event.preventDefault(); const textarea = event.currentTarget; const result = insertTabAtSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd); updateExpandedText(result.value); requestAnimationFrame(() => textarea.setSelectionRange(result.cursor, result.cursor)) }} placeholder="输入文本…"/></label></div><footer><small>{expandedTextValue.length} 字符</small><button onClick={() => setExpandedText(null)}>完成</button></footer></section></div>}
+    {expandedText && <div className="property-dialog-backdrop text-editor-backdrop" onPointerDown={() => setExpandedText(null)}><section className="expanded-text-dialog" role="dialog" aria-modal="true" aria-label={`${expandedText.name}编辑器`} onPointerDown={event => event.stopPropagation()}><header><div><strong>{expandedText.name}</strong><small>专注编辑</small></div><button aria-label="关闭编辑器" onClick={() => setExpandedText(null)}><X size={16}/></button></header><div className="expanded-text-workspace"><label><span>Markdown</span><textarea autoFocus value={expandedTextValue} onChange={event => updateExpandedText(event.target.value)} onKeyDown={event => { if (event.key !== 'Tab') return; event.preventDefault(); const textarea = event.currentTarget; const result = insertTabAtSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd); updateExpandedText(result.value); requestAnimationFrame(() => textarea.setSelectionRange(result.cursor, result.cursor)) }} placeholder="输入文本…"/></label><article><span>预览</span><div><MarkdownText value={expandedTextValue}/></div></article></div><footer><small>{expandedTextValue.length} 字符</small><button onClick={() => setExpandedText(null)}>完成</button></footer></section></div>}
     {propertyTarget && <div className="property-dialog-backdrop" onPointerDown={() => setPropertyTarget(null)}><form className="property-dialog" onPointerDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); addPropertyDefinition() }}><div><strong>{propertyTarget === 'global' ? '添加全局属性' : '添加属性'}</strong><button type="button" onClick={() => setPropertyTarget(null)}><X size={14}/></button></div><label><span>{propertyTarget === 'global' ? '属性名称' : '属性名称'}</span><input autoFocus value={propertyName} onChange={event => setPropertyName(event.target.value)} placeholder={propertyTarget === 'global' ? '例如：来源' : '例如：定义'}/></label><label><span>内容类型</span><select value={propertyType} onChange={event => setPropertyType(event.target.value as PropertyType)}><option value="text">文本</option><option value="text-list">文本序列</option><option value="image">图片</option></select></label><p>{propertyType === 'text' ? '适合一段可以直接阅读的文本。' : propertyType === 'text-list' ? '适合步骤、链接或多条并列内容。' : '可从剪贴板粘贴或选择文件；图片保存到 .Wordverse/assets。'}</p><button className="property-confirm" disabled={!propertyName.trim()}>创建</button></form></div>}
     {deletePropertyRequest && <div className="property-dialog-backdrop" onPointerDown={() => setDeletePropertyRequest(null)}><div className="confirm-dialog" onPointerDown={event => event.stopPropagation()}><strong>删除“{deletePropertyRequest.name}”？</strong><p>{deletePropertyRequest.global ? '这是注解，将从所有词眼中移除，并删除已经填写的对应内容。' : '该内容将从当前词中移除。'}</p><div><button onClick={() => setDeletePropertyRequest(null)}>取消</button><button className="danger" onClick={confirmPropertyDelete}>确认删除</button></div></div></div>}
     {renameGraphRequest && <div className="property-dialog-backdrop" onPointerDown={() => setRenameGraphRequest(null)}><form className="property-dialog" onPointerDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); renameMainGraph() }}><div><strong>重命名主词网</strong><button type="button" onClick={() => setRenameGraphRequest(null)}><X size={14}/></button></div><label><span>名称</span><input autoFocus value={renameGraphRequest.name} onFocus={event => event.currentTarget.select()} onChange={event => setRenameGraphRequest(current => current ? { ...current, name: event.target.value } : null)}/></label><button className="property-confirm" disabled={!renameGraphRequest.name.trim()}>完成</button></form></div>}
     {deleteGraphRequest && <div className="property-dialog-backdrop" onPointerDown={() => setDeleteGraphRequest(null)}><div className="confirm-dialog" onPointerDown={event => event.stopPropagation()}><strong>删除主词网“{graphs[deleteGraphRequest]?.name}”？</strong><p>该主词网及内部所有子词网都会被删除。其他主词网不会受到影响，此操作仍可通过撤销恢复。</p><div><button onClick={() => setDeleteGraphRequest(null)}>取消</button><button className="danger" onClick={deleteMainGraph}>确认删除</button></div></div></div>}
-    {closeProblem && <div className="property-dialog-backdrop"><div className="confirm-dialog" role="alertdialog" aria-modal="true"><strong>{closeProblem === 'timeout' ? '保存超时，软件尚未关闭' : closeProblem === 'close-error' ? '系统拒绝了窗口关闭请求' : '保存失败，软件尚未关闭'}</strong><p>为避免丢失未保存内容，Wordverse 暂停了退出。可取消后重试保存，或确认不保存直接退出。</p><div><button onClick={() => setCloseProblem(null)}>返回词库</button><button className="danger" onClick={() => { void forceCloseApp() }}>不保存，仍然退出</button></div></div></div>}
+    {closeProblem && <div className="property-dialog-backdrop"><div className="confirm-dialog" role="alertdialog" aria-modal="true"><strong>{closeProblem === 'timeout' ? '保存超时，软件尚未关闭' : closeProblem === 'close-error' ? '系统拒绝了窗口关闭请求' : '保存失败，软件尚未关闭'}</strong><p>为避免丢失内容，Wordverse 已暂停退出。请返回词库检查状态，或重试保存；只有保存成功后才能关闭。</p><div><button onClick={() => setCloseProblem(null)}>返回词库</button><button onClick={() => { setCloseProblem(null); saveImmediately() }}>重试保存</button></div></div></div>}
     {helpOpen && <div className="property-dialog-backdrop" onPointerDown={() => setHelpOpen(false)}><section className="shortcut-dialog" aria-modal="true" role="dialog" aria-label="快捷键帮助" onPointerDown={event => event.stopPropagation()}><header><div><strong>快捷键</strong><small>Scene 操作速览</small></div><button aria-label="关闭" onClick={() => setHelpOpen(false)}><X size={15}/></button></header><div className="shortcut-grid"><span>新建词</span><kbd>双击空白</kbd><span>重命名</span><kbd>F2</kbd><span>建立连接</span><kbd>L</kbd><span>连续连接</span><kbd>Shift + L</kbd><span>移动词</span><kbd>Alt + 拖动</kbd><span>聚焦所选 / 全图</span><kbd>F</kbd><span>进入子词网</span><kbd>双击词</kbd><span>返回 / 取消</span><kbd>Esc</kbd><span>空间游走</span><kbd>W A S D</kbd><span>场景全屏</span><kbd>Space</kbd><span>删除所选</span><kbd>Delete</kbd><span>撤销 / 重做</span><kbd>Ctrl + Z / Ctrl + Shift + Z</kbd><span>保存</span><kbd>Ctrl + S</kbd><span>检索</span><kbd>Ctrl + K</kbd></div><p>右键词还可连接、重命名或移到当前视野。输入文字时场景快捷键会自动暂停。</p></section></div>}
     <footer className="status"><span className={`save-state ${saveState}`}><i/>{saveState === 'loading' ? '正在载入词库' : saveState === 'saving' ? '正在保存' : saveState === 'error' ? '保存失败或发生同步冲突' : `已保存到${workspaceStorageLabel}`}</span><span>{path.map(id => graphs[id]?.name || id).join(' / ')}{selected ? ` / ${selected.label}` : ''}</span><span><Command size={13}/> F 聚焦 · {graph.nodes.length} 词 · {graph.edges.length} 连接</span></footer>
   </div>
