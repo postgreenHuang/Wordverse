@@ -146,11 +146,49 @@ fn persist_image_asset_to(bytes: &[u8], directory: &Path) -> Result<String, Stri
 
 fn persist_image_asset(bytes: &[u8]) -> Result<String, String> { persist_image_asset_to(bytes, &wordverse_dir()?.join("assets")) }
 
+fn map_markdown_image_sources<F>(contents: &str, prefix: &str, mut convert: F) -> Result<Option<String>, String>
+where F: FnMut(&str) -> Result<String, String> {
+  let mut output = String::new();
+  let mut remaining = contents;
+  let mut changed = false;
+  while let Some(open) = remaining.find("](") {
+    let source_start = open + 2;
+    let after_open = &remaining[source_start..];
+    let Some(close) = after_open.find(')') else { break; };
+    let source = &after_open[..close];
+    output.push_str(&remaining[..source_start]);
+    if source.starts_with(prefix) {
+      output.push_str(&convert(source)?);
+      changed = true;
+    } else { output.push_str(source); }
+    remaining = &after_open[close..];
+  }
+  if !changed { return Ok(None); }
+  output.push_str(remaining);
+  Ok(Some(output))
+}
+
+fn data_image_to_asset(contents: &str, asset_directory: &Path) -> Result<String, String> {
+  let (_, encoded) = contents.split_once(";base64,").ok_or("unsupported_image_data_url")?;
+  persist_image_asset_to(&base64_decode(encoded)?, asset_directory)
+}
+
+fn asset_to_data_image(reference: &str, asset_directory: &Path) -> Result<String, String> {
+  let name = reference.strip_prefix("asset:").ok_or("invalid_asset_reference")?;
+  if name.is_empty() || Path::new(name).components().count() != 1 { return Err("invalid_asset_reference".into()); }
+  let bytes = fs::read(asset_directory.join(name)).map_err(|error| format!("asset_read_failed: {error}"))?;
+  let extension = image_extension(&bytes).ok_or("unsupported_image_format")?;
+  let mime = match extension { "jpg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", _ => return Err("unsupported_image_format".into()) };
+  Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+}
+
 fn externalize_data_images(value: &mut Value, asset_directory: &Path) -> Result<(), String> {
   match value {
     Value::String(contents) if contents.starts_with("data:image/") => {
-      let (_, encoded) = contents.split_once(";base64,").ok_or("unsupported_image_data_url")?;
-      *contents = persist_image_asset_to(&base64_decode(encoded)?, asset_directory)?;
+      *contents = data_image_to_asset(contents, asset_directory)?;
+    }
+    Value::String(contents) => {
+      if let Some(converted) = map_markdown_image_sources(contents, "data:image/", |source| data_image_to_asset(source, asset_directory))? { *contents = converted; }
     }
     Value::Array(items) => for item in items { externalize_data_images(item, asset_directory)?; },
     Value::Object(entries) => for item in entries.values_mut() { externalize_data_images(item, asset_directory)?; },
@@ -162,12 +200,10 @@ fn externalize_data_images(value: &mut Value, asset_directory: &Path) -> Result<
 fn inline_asset_references(value: &mut Value, asset_directory: &Path) -> Result<(), String> {
   match value {
     Value::String(reference) if reference.starts_with("asset:") => {
-      let name = reference.strip_prefix("asset:").ok_or("invalid_asset_reference")?;
-      if name.is_empty() || Path::new(name).components().count() != 1 { return Err("invalid_asset_reference".into()); }
-      let bytes = fs::read(asset_directory.join(name)).map_err(|error| format!("asset_read_failed: {error}"))?;
-      let extension = image_extension(&bytes).ok_or("unsupported_image_format")?;
-      let mime = match extension { "jpg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", _ => return Err("unsupported_image_format".into()) };
-      *reference = format!("data:{mime};base64,{}", base64_encode(&bytes));
+      *reference = asset_to_data_image(reference, asset_directory)?;
+    }
+    Value::String(contents) => {
+      if let Some(converted) = map_markdown_image_sources(contents, "asset:", |source| asset_to_data_image(source, asset_directory))? { *contents = converted; }
     }
     Value::Array(items) => for item in items { inline_asset_references(item, asset_directory)?; },
     Value::Object(entries) => for item in entries.values_mut() { inline_asset_references(item, asset_directory)?; },
@@ -175,7 +211,6 @@ fn inline_asset_references(value: &mut Value, asset_directory: &Path) -> Result<
   }
   Ok(())
 }
-
 fn document_revision(contents: &str) -> Option<u64> {
   serde_json::from_str::<Value>(contents).ok()?.get("revision")?.as_u64()
 }
@@ -233,6 +268,13 @@ fn collect_child_graphs(graph_id: &str, all: &Map<String, Value>, output: &mut M
   if let Some(nodes) = graph.get("nodes").and_then(Value::as_array) {
     for node in nodes {
       if let Some(id) = node.get("id").and_then(Value::as_str) { collect_child_graphs(&format!("child:{id}"), all, output, visited); }
+    }
+  }
+  if let Some(trash) = graph.get("trash").and_then(Value::as_array) {
+    for item in trash {
+      if let Some(id) = item.get("node").and_then(|node| node.get("id")).and_then(Value::as_str) {
+        collect_child_graphs(&format!("child:{id}"), all, output, visited);
+      }
     }
   }
 }
@@ -536,6 +578,19 @@ mod tests {
   }
 
   #[test]
+  fn portable_markdown_image_round_trip_preserves_surrounding_text() {
+    let directory = std::env::temp_dir().join(format!("wordverse-markdown-images-test-{}", std::process::id()));
+    let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let image = format!("data:image/png;base64,{}", super::base64_encode(&png));
+    let original = format!("前文\n![截图]({image})\n后文");
+    let mut value = serde_json::json!({ "note": original });
+    super::externalize_data_images(&mut value, &directory).unwrap();
+    assert!(value["note"].as_str().unwrap().contains("![截图](asset:image-"));
+    super::inline_asset_references(&mut value, &directory).unwrap();
+    assert_eq!(value["note"], original);
+    std::fs::remove_dir_all(directory).unwrap();
+  }
+  #[test]
   fn graph_filenames_are_readable_safe_and_unique() {
     let mut used = HashSet::new();
     assert_eq!(super::safe_graph_filename("学习:英语", &mut used), "学习_英语.json");
@@ -558,4 +613,17 @@ mod tests {
     assert!(output.contains_key("child:nested"));
     assert!(!output.contains_key("graph:other"));
   }
+  #[test]
+  fn main_graph_package_keeps_trashed_node_subtrees() {
+    let all = serde_json::json!({
+      "root": { "nodes": [{ "id": "other" }], "trash": [{ "node": { "id": "cut" } }] },
+      "child:cut": { "nodes": [{ "id": "nested" }] },
+      "child:nested": { "nodes": [] }
+    }).as_object().unwrap().clone();
+    let mut output = serde_json::Map::new();
+    super::collect_child_graphs("root", &all, &mut output, &mut HashSet::new());
+    assert!(output.contains_key("child:cut"));
+    assert!(output.contains_key("child:nested"));
+  }
+
 }

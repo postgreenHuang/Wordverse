@@ -72,6 +72,7 @@ export function graphTreeIds(graphs: Record<string, Graph>, rootId: string): Set
     if (result.has(graphId) || !graphs[graphId]) return
     result.add(graphId)
     graphs[graphId].nodes.forEach(node => visit(`child:${node.id}`))
+    graphs[graphId].trash?.forEach(item => visit(`child:${item.node.id}`))
   }
   visit(rootId)
   return result

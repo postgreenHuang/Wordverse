@@ -1,12 +1,13 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Billboard, Grid, Html, Line, OrbitControls, Text, TransformControls } from '@react-three/drei'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { ArrowDown, ArrowLeft, ArrowUp, Axis3d, ChevronDown, CircleHelp, CirclePlus, Command, FileBox, Focus, Folder, Home, LassoSelect, Link2, LocateFixed, Maximize2, Menu, Moon, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Play, Plus, Redo2, Scaling, Search, Settings2, Sparkles, SquareDashedMousePointer, Sun, Trash2, Undo2, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowUp, Axis3d, ChevronDown, CircleHelp, CirclePlus, Command, Eye, FileBox, Focus, Folder, Home, LassoSelect, Link2, LocateFixed, Maximize2, Menu, Moon, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Play, Plus, Redo2, Scaling, Search, Settings2, Sparkles, SquareDashedMousePointer, Sun, Trash2, Undo2, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
 import { Color, Raycaster, Vector2, Vector3 } from 'three'
 import { initialGraph } from './data'
 import { connectRelations, cutRelations, deleteGraphTree, deleteWord, restoreRelation, restoreWord } from './graphOps'
 import { balancedPosition, nearbyIntentPosition, relaxLayout } from './layout'
+import { copyNodeSelection, pasteNodeSelection, type NodeClipboard } from './nodeClipboard'
 import { pointInPolygon, segmentHitsBox, segmentHitsPolygon } from './selectionGeometry'
 import { parseSearchTerms } from './searchTerms'
 import { insertTabAtSelection, parseMarkdownBlocks } from './textEditing'
@@ -29,7 +30,7 @@ const SHORTCUT_LABELS: { action: ShortcutAction; label: string }[] = [
   { action: 'selectSingle', label: '取消 Gizmo' }, { action: 'gizmoMove', label: '移动 Gizmo' }, { action: 'gizmoScale', label: '缩放 Gizmo' }, { action: 'selectBox', label: '框选模式' }, { action: 'selectLasso', label: '圈选模式' }, { action: 'encapsulate', label: '封装为子词网' }, { action: 'edgeSource', label: '查看连线起点' }, { action: 'edgeTarget', label: '查看连线终点' }, { action: 'focus', label: '聚焦所选 / 全图' }, { action: 'rename', label: '重命名' }, { action: 'link', label: '建立连接' }, { action: 'linkContinuous', label: '连续连接' }, { action: 'duplicate', label: '复制并连接' }, { action: 'fullscreen', label: '场景全屏' }, { action: 'forward', label: '相机前进' }, { action: 'backward', label: '相机后退' }, { action: 'left', label: '相机左移' }, { action: 'right', label: '相机右移' }, { action: 'up', label: '相机上移' }, { action: 'down', label: '相机下移' }, { action: 'remove', label: '删除所选' }, { action: 'undo', label: '撤销' }, { action: 'redo', label: '重做' }, { action: 'save', label: '保存' }, { action: 'search', label: '检索' }
 ]
 type CameraSnapshot = { position: [number, number, number]; target: [number, number, number]; up: [number, number, number] }
-type NodeClipboard = { nodes: WordNode[]; edges: Edge[] }
+
 function useStableInputSelection(value: string) {
   const inputRef = useRef<HTMLInputElement>(null)
   const selectionRef = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null)
@@ -469,11 +470,64 @@ function TextWithLinks({ value }: { value: string }) {
 }
 
 function InlineMarkdown({ value }: { value: string }) {
-  return <>{value.split(/(`[^`\n]+`)/g).filter(Boolean).map((part, index) => part.startsWith('`') && part.endsWith('`')
-    ? <code key={index}>{part.slice(1, -1)}</code>
-    : <TextWithLinks key={index} value={part}/>)}</>
+  const pattern = /!\[([^\]\n]*)\]\((asset:[a-zA-Z0-9._-]+|data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+)\)|`[^`\n]+`/g
+  const parts: React.ReactNode[] = []
+  let cursor = 0
+  for (const match of value.matchAll(pattern)) {
+    const index = match.index ?? 0
+    if (index > cursor) parts.push(<TextWithLinks key={`text:${index}`} value={value.slice(cursor, index)}/>)
+    if (match[2]) parts.push(<StoredImage key={`image:${index}`} value={match[2]} alt={match[1] || '正文图片'} className="markdown-inline-image"/>)
+    else parts.push(<code key={`code:${index}`}>{match[0].slice(1, -1)}</code>)
+    cursor = index + match[0].length
+  }
+  if (cursor < value.length) parts.push(<TextWithLinks key={`text:${cursor}`} value={value.slice(cursor)}/>)
+  return <>{parts}</>
 }
 
+function MarkdownEditor({ value, onChange, expanded = false }: { value: string; onChange: (value: string) => void; expanded?: boolean }) {
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const valueRef = useRef(value)
+  valueRef.current = value
+  const [uploadError, setUploadError] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const insertImage = async (file: File, start: number, end: number) => {
+    setUploadError('')
+    setUploading(true)
+    try {
+      const source = await storeImageAsset(file)
+      const current = valueRef.current
+      const insertion = `\n![图片](${source})\n`
+      onChange(`${current.slice(0, start)}${insertion}${current.slice(end)}`)
+      requestAnimationFrame(() => {
+        const cursor = start + insertion.length
+        inputRef.current?.focus()
+        inputRef.current?.setSelectionRange(cursor, cursor)
+      })
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : '图片保存失败，请重试')
+    } finally { setUploading(false) }
+  }
+  return <div className={expanded ? 'markdown-editor expanded' : 'markdown-editor'}>
+    <textarea ref={inputRef} autoFocus disabled={uploading} value={value} onChange={event => onChange(event.target.value)} onPaste={event => {
+      const image = [...event.clipboardData.items].find(item => item.kind === 'file')?.getAsFile()
+      if (!image) return
+      event.preventDefault()
+      void insertImage(image, event.currentTarget.selectionStart, event.currentTarget.selectionEnd)
+    }} onKeyDown={event => {
+      if (event.key !== 'Tab') return
+      event.preventDefault()
+      const textarea = event.currentTarget
+      const result = insertTabAtSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd)
+      onChange(result.value)
+      requestAnimationFrame(() => textarea.setSelectionRange(result.cursor, result.cursor))
+    }} placeholder="输入文本…"/>
+    <div className="markdown-editor-actions"><label>插入图片<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={uploading} onChange={event => {
+      const file = event.currentTarget.files?.[0]
+      if (file) void insertImage(file, inputRef.current?.selectionStart ?? value.length, inputRef.current?.selectionEnd ?? value.length)
+      event.currentTarget.value = ''
+    }}/></label>{uploading && <span>正在保存图片…</span>}{uploadError && <span role="alert">{uploadError}</span>}</div>
+  </div>
+}
 function MarkdownText({ value }: { value: string }) {
   const blocks = useMemo(() => parseMarkdownBlocks(value), [value])
   return <div className="markdown-text">{blocks.map((block, blockIndex) => block.type === 'table'
@@ -991,7 +1045,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const [imageUploadError, setImageUploadError] = useState('')
   const [transformExpanded, setTransformExpanded] = useState(false)
   const [imagePreview, setImagePreview] = useState<{ value: string; alt: string } | null>(null)
-  const [expandedText, setExpandedText] = useState<{ id: string; name: string } | null>(null)
+  const [expandedText, setExpandedText] = useState<{ id: string; name: string; mode: 'edit' | 'preview' } | null>(null)
   const [deletePropertyRequest, setDeletePropertyRequest] = useState<{ id: string; name: string; global: boolean } | null>(null)
   const [autoLayout, setAutoLayout] = useState(() => localStorage.getItem('wordverse.autoLayout') !== 'false')
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => storedNumber('wordverse.leftPanelWidth', 220))
@@ -1170,11 +1224,17 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   }, [settingsOpen, saveState])
   useEffect(() => {
     if (!resizingPanel) return
-    const move = (event: PointerEvent) => resizingPanel === 'left' ? setLeftPanelWidth(Math.max(180, Math.min(380, event.clientX))) : setRightPanelWidth(Math.max(240, Math.min(460, innerWidth - event.clientX)))
+    const move = (event: PointerEvent) => resizingPanel === 'left' ? setLeftPanelWidth(Math.max(180, Math.min(380, event.clientX))) : setRightPanelWidth(Math.max(240, Math.min(900, innerWidth - leftPanelWidth - 360, innerWidth - event.clientX)))
     const stop = () => setResizingPanel(null)
     addEventListener('pointermove', move); addEventListener('pointerup', stop)
     return () => { removeEventListener('pointermove', move); removeEventListener('pointerup', stop) }
-  }, [resizingPanel])
+  }, [resizingPanel, leftPanelWidth])
+  useEffect(() => {
+    const fitInspector = () => setRightPanelWidth(width => Math.max(240, Math.min(width, 900, innerWidth - leftPanelWidth - 360)))
+    fitInspector()
+    addEventListener('resize', fitInspector)
+    return () => removeEventListener('resize', fitInspector)
+  }, [leftPanelWidth])
   useEffect(() => localStorage.setItem(projectDeviceKey('tabs'), JSON.stringify({ tabs, activeId: activeTabId })), [tabs, activeTabId])
   useEffect(() => {
     if (!storageReady) return
@@ -1492,16 +1552,11 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
     }); setSelectedIds(new Set([id])); setSelectedId(id); setEditingId(id); trace('node', `Created ${id}`)
   }
   const copyNodes = (ids = [...selectedIds]) => {
-    const copiedIds = new Set(ids)
-    const nodes = graph.nodes.filter(node => copiedIds.has(node.id) && !node.isContextRoot)
-    if (!nodes.length) return false
-    const snapshot = JSON.parse(JSON.stringify({
-      nodes,
-      edges: graph.edges.filter(edge => copiedIds.has(edge.source) && copiedIds.has(edge.target)),
-    })) as NodeClipboard
+    const snapshot = copyNodeSelection(graph, graphs, ids)
+    if (!snapshot) return false
     setNodeClipboard(snapshot)
     setContextMenu(null)
-    trace('clipboard', `Copied ${nodes.length} node(s)`)
+    trace('clipboard', `Copied ${snapshot.nodes.length} node(s)`)
     return true
   }
   const cutNodes = () => {
@@ -1520,32 +1575,27 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   }
   const pasteNodes = () => {
     if (!nodeClipboard?.nodes.length) return
-    const idMap = new Map(nodeClipboard.nodes.map(node => [node.id, crypto.randomUUID()]))
-    const centroid = nodeClipboard.nodes.reduce<[number, number, number]>((sum, node) => [sum[0] + node.position[0], sum[1] + node.position[1], sum[2] + node.position[2]], [0, 0, 0]).map(value => value / nodeClipboard.nodes.length) as [number, number, number]
     const requested = sceneCursorPoint.current
     const target = requested ? nearbyIntentPosition(graph.nodes, requested) : balancedPosition(graph.nodes)
-    const timestamp = new Date().toISOString()
-    const pasted = nodeClipboard.nodes.map(node => ({
-      ...JSON.parse(JSON.stringify(node)),
-      id: idMap.get(node.id)!,
-      position: [node.position[0] - centroid[0] + target[0], node.position[1] - centroid[1] + target[1], node.position[2] - centroid[2] + target[2]] as [number, number, number],
-      positionLocked: true,
-      isContextRoot: false,
-      hasChildGraph: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
+    const pasted = pasteNodeSelection(nodeClipboard, graph.id, target, new Date().toISOString())
+    commitGraphs(current => ({
+      ...current,
+      [graph.id]: {
+        ...(current[graph.id] || graph),
+        nodes: [...(current[graph.id] || graph).nodes, ...pasted.nodes],
+        edges: [...(current[graph.id] || graph).edges, ...pasted.edges],
+      },
+      ...pasted.childGraphs,
     }))
-    const pastedEdges = nodeClipboard.edges.map(edge => ({ source: idMap.get(edge.source)!, target: idMap.get(edge.target)! }))
-    setGraph(current => ({ ...current, nodes: [...current.nodes, ...pasted], edges: [...current.edges, ...pastedEdges] }))
-    const pastedIds = new Set(pasted.map(node => node.id))
+    const pastedIds = new Set(pasted.nodes.map(node => node.id))
     setSelectedIds(pastedIds)
-    setSelectedId(pasted.at(-1)?.id || '')
+    setSelectedId(pasted.nodes.at(-1)?.id || '')
     setSelectedEdge('')
     setSelectedEdges(new Set())
     setSceneContextMenu(null)
     setSelectionMode('single')
     setGizmoMode('translate')
-    trace('clipboard', `Pasted ${pasted.length} node(s)`)
+    trace('clipboard', `Pasted ${pasted.nodes.length} node(s)`)
   }
   const copyGhostReference = (node: WordNode) => {
     const source = node.ghostSource || (() => {
@@ -1664,7 +1714,7 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
   const expandedTextDefinition = expandedText?.id === '__note__' ? null : visibleProperties.find(item => item.definition.id === expandedText?.id)?.definition
   const expandedTextValue = expandedText?.id === '__note__' ? selected?.note || '' : typeof selected?.properties?.find(item => item.id === expandedText?.id)?.value === 'string' ? selected.properties.find(item => item.id === expandedText?.id)!.value as string : ''
   const updateExpandedText = (value: string) => {
-    if (!expandedText) return
+    if (expandedText?.mode !== 'edit') return
     if (expandedText.id === '__note__') update({ note: value })
     else if (expandedTextDefinition) updateProperty(expandedTextDefinition, value)
   }
@@ -1863,13 +1913,23 @@ export default function App({ projectName, onRequestProjectManager }: { projectN
       <section className={`transform-section${transformExpanded ? ' expanded' : ''}`}><button className="transform-heading" aria-expanded={transformExpanded} onClick={() => setTransformExpanded(value => !value)}><span><ChevronDown size={12}/><h3>Transform</h3></span><Axis3d size={13}/></button>{transformExpanded && <><div className="transform-row"><span>Position</span><div className="transform-vector">{(['X', 'Y', 'Z'] as const).map((axis, index) => <label key={axis} className={`axis-${axis.toLowerCase()}`}><b>{axis}</b><input type="number" step="0.1" value={Math.round(selected.position[index] * 1000) / 1000} onChange={event => updatePositionAxis(index, event.target.value)}/></label>)}</div></div><div className="transform-row"><span>Scale</span><label className="uniform-scale"><input type="number" step="0.05" min="0.05" max="20" value={Math.round(selected.scale * 1000) / 1000} onChange={event => updateScale(event.target.value)}/></label></div></>}</section>
       <section className="content-section"><div className="content-heading compact">{!selectedIsGhost && <button title="添加属性" aria-label="添加属性" onClick={() => { setPropertyType('text'); setPropertyTarget('node') }}><Plus size={14}/></button>}</div>
         {!selected.note && visibleProperties.length === 0 && <div className="content-empty">{selectedIsGhost ? '源节点暂无内容' : '点击 + 添加文本、文本序列或图片'}</div>}
-        {selected.note && <article className="content-block"><header><span>文本</span>{!selectedIsGhost && <span className="content-actions"><button title="放大编辑和预览" onClick={() => setExpandedText({ id: '__note__', name: '文本' })}><Maximize2 size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span>}</header>{editingPropertyId === '__note__' ? <div className="content-editor"><textarea autoFocus value={selected.note} onChange={event => update({ note: event.target.value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <MarkdownText value={selected.note}/>}</article>}
-        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span>{!selectedIsGhost && <span className="content-actions">{definition.type === 'text' && <button title="放大编辑和预览" onClick={() => setExpandedText({ id: definition.id, name: definition.name })}><Maximize2 size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span>}</header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <textarea autoFocus value={typeof value === 'string' ? value : ''} placeholder="输入文本…" onChange={event => updateProperty(definition, event.target.value)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <MarkdownText value={value}/> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
+        {selected.note && <article className="content-block"><header><span>文本</span>{!selectedIsGhost && <span className="content-actions"><button title="放大编辑" onClick={() => setExpandedText({ id: '__note__', name: '文本', mode: 'edit' })}><Maximize2 size={12}/></button><button title="只读预览" aria-label="只读预览文本" onClick={() => setExpandedText({ id: '__note__', name: '文本', mode: 'preview' })}><Eye size={12}/></button><button title="编辑文本" onClick={() => setEditingPropertyId('__note__')}><Pencil size={12}/></button></span>}</header>{editingPropertyId === '__note__' ? <div className="content-editor"><MarkdownEditor value={selected.note} onChange={value => update({ note: value })}/><div><button onClick={() => setDeletePropertyRequest({ id: '__note__', name: '文本', global: false })}>移除</button><button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : <MarkdownText value={selected.note}/>}</article>}
+        {visibleProperties.map(({ definition, value, global }) => <article className="content-block" key={definition.id}><header><span>{definition.name}</span>{!selectedIsGhost && <span className="content-actions">{definition.type === 'text' && <button title="放大编辑" onClick={() => setExpandedText({ id: definition.id, name: definition.name, mode: 'edit' })}><Maximize2 size={12}/></button>}{definition.type === 'text' && <button title="只读预览" aria-label={`只读预览${definition.name}`} onClick={() => setExpandedText({ id: definition.id, name: definition.name, mode: 'preview' })}><Eye size={12}/></button>}<button title={`编辑${definition.name}`} onClick={() => setEditingPropertyId(definition.id)}><Pencil size={12}/></button></span>}</header>{editingPropertyId === definition.id ? <div className="content-editor">{definition.type === 'text' ? <MarkdownEditor value={typeof value === 'string' ? value : ''} onChange={text => updateProperty(definition, text)}/> : definition.type === 'text-list' ? <TextListEditor values={Array.isArray(value) ? value : []} onChange={items => updateProperty(definition, items)}/> : <div className="image-editor" tabIndex={0} onPaste={event => pastePropertyImage(definition, event)} title="点击此区域后可按 Ctrl + V 粘贴剪贴板图片">{typeof value === 'string' && value ? <StoredImage value={value} alt={definition.name}/> : <span className="image-paste-target">点击此处，然后按 Ctrl + V 粘贴图片</span>}<div className="image-editor-actions"><label><input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={event => { void choosePropertyImage(definition, event.target.files?.[0]); event.currentTarget.value = '' }}/><span>{typeof value === 'string' && value ? '替换图片' : '选择文件'}</span></label><small>或聚焦此区域后 Ctrl + V</small>{typeof value === 'string' && value && <button type="button" onClick={() => removePropertyImage(definition)}>移除图片</button>}</div>{imageUploadError && <p className="image-upload-error">{imageUploadError}</p>}</div>}<div>{!global && <button onClick={() => setDeletePropertyRequest({ id: definition.id, name: definition.name, global: false })}>移除</button>}<button onClick={() => setEditingPropertyId('')}>完成</button></div></div> : definition.type === 'text' && typeof value === 'string' && value ? <MarkdownText value={value}/> : definition.type === 'text-list' ? <div className="content-list">{(Array.isArray(value) ? value : []).filter(Boolean).map((item, index) => { const href = webLink(item); return <p key={`${item}:${index}`}>{href ? <ExternalLink href={href}>{item}</ExternalLink> : item}</p> })}</div> : definition.type === 'image' && typeof value === 'string' && value ? <button className="content-image-trigger" title="查看大图" onClick={() => setImagePreview({ value, alt: definition.name })}><StoredImage className="content-image" value={value} alt={definition.name}/></button> : <p className="content-placeholder">暂无内容</p>}</article>)}
       </section>
       <div className="inspector-footer"><span>更新于 {formatExactTime(selected.updatedAt)}</span><span>Delete 删除</span></div></> : <div className="empty-inspector">选择一个词查看属性</div>}
     </aside>
     {imagePreview && <div className="property-dialog-backdrop media-backdrop" onPointerDown={() => setImagePreview(null)}><section className="image-preview-dialog" role="dialog" aria-modal="true" aria-label={`${imagePreview.alt}大图预览`} onPointerDown={event => event.stopPropagation()}><header><strong>{imagePreview.alt}</strong><button aria-label="关闭大图" onClick={() => setImagePreview(null)}><X size={16}/></button></header><div><StoredImage value={imagePreview.value} alt={imagePreview.alt}/></div></section></div>}
-    {expandedText && <div className="property-dialog-backdrop text-editor-backdrop" onPointerDown={() => setExpandedText(null)}><section className="expanded-text-dialog" role="dialog" aria-modal="true" aria-label={`${expandedText.name}编辑器`} onPointerDown={event => event.stopPropagation()}><header><div><strong>{expandedText.name}</strong><small>专注编辑</small></div><button aria-label="关闭编辑器" onClick={() => setExpandedText(null)}><X size={16}/></button></header><div className="expanded-text-workspace"><label><span>Markdown</span><textarea autoFocus value={expandedTextValue} onChange={event => updateExpandedText(event.target.value)} onKeyDown={event => { if (event.key !== 'Tab') return; event.preventDefault(); const textarea = event.currentTarget; const result = insertTabAtSelection(textarea.value, textarea.selectionStart, textarea.selectionEnd); updateExpandedText(result.value); requestAnimationFrame(() => textarea.setSelectionRange(result.cursor, result.cursor)) }} placeholder="输入文本…"/></label><article><span>预览</span><div><MarkdownText value={expandedTextValue}/></div></article></div><footer><small>{expandedTextValue.length} 字符</small><button onClick={() => setExpandedText(null)}>完成</button></footer></section></div>}
+    {expandedText && <div className="property-dialog-backdrop text-editor-backdrop" onPointerDown={() => setExpandedText(null)}>
+      <section className="expanded-text-dialog" role="dialog" aria-modal="true" aria-label={`${expandedText.name}${expandedText.mode === 'preview' ? '只读预览' : '编辑器'}`} onPointerDown={event => event.stopPropagation()}>
+        <header><div><strong>{expandedText.name}</strong><small>{expandedText.mode === 'preview' ? '只读预览' : '专注编辑'}</small></div><button aria-label="关闭窗口" onClick={() => setExpandedText(null)}><X size={16}/></button></header>
+        <div className="expanded-text-workspace">
+          {expandedText.mode === 'edit'
+            ? <div className="expanded-text-source"><span>Markdown</span><MarkdownEditor expanded value={expandedTextValue} onChange={updateExpandedText}/></div>
+            : <article><span>预览</span><div><MarkdownText value={expandedTextValue}/></div></article>}
+        </div>
+        <footer><small>{expandedTextValue.length} 字符</small><button onClick={() => setExpandedText(null)}>{expandedText.mode === 'preview' ? '关闭' : '完成'}</button></footer>
+      </section>
+    </div>}
     {propertyTarget && <div className="property-dialog-backdrop" onPointerDown={() => setPropertyTarget(null)}><form className="property-dialog" onPointerDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); addPropertyDefinition() }}><div><strong>{propertyTarget === 'global' ? '添加全局属性' : '添加属性'}</strong><button type="button" onClick={() => setPropertyTarget(null)}><X size={14}/></button></div><label><span>{propertyTarget === 'global' ? '属性名称' : '属性名称'}</span><input autoFocus value={propertyName} onChange={event => setPropertyName(event.target.value)} placeholder={propertyTarget === 'global' ? '例如：来源' : '例如：定义'}/></label><label><span>内容类型</span><select value={propertyType} onChange={event => setPropertyType(event.target.value as PropertyType)}><option value="text">文本</option><option value="text-list">文本序列</option><option value="image">图片</option></select></label><p>{propertyType === 'text' ? '适合一段可以直接阅读的文本。' : propertyType === 'text-list' ? '适合步骤、链接或多条并列内容。' : '可从剪贴板粘贴或选择文件；图片保存到 .Wordverse/assets。'}</p><button className="property-confirm" disabled={!propertyName.trim()}>创建</button></form></div>}
     {deletePropertyRequest && <div className="property-dialog-backdrop" onPointerDown={() => setDeletePropertyRequest(null)}><div className="confirm-dialog" onPointerDown={event => event.stopPropagation()}><strong>删除“{deletePropertyRequest.name}”？</strong><p>{deletePropertyRequest.global ? '这是注解，将从所有词眼中移除，并删除已经填写的对应内容。' : '该内容将从当前词中移除。'}</p><div><button onClick={() => setDeletePropertyRequest(null)}>取消</button><button className="danger" onClick={confirmPropertyDelete}>确认删除</button></div></div></div>}
     {renameGraphRequest && <div className="property-dialog-backdrop" onPointerDown={() => setRenameGraphRequest(null)}><form className="property-dialog" onPointerDown={event => event.stopPropagation()} onSubmit={event => { event.preventDefault(); renameMainGraph() }}><div><strong>重命名主词网</strong><button type="button" onClick={() => setRenameGraphRequest(null)}><X size={14}/></button></div><label><span>名称</span><input autoFocus value={renameGraphRequest.name} onFocus={event => event.currentTarget.select()} onChange={event => setRenameGraphRequest(current => current ? { ...current, name: event.target.value } : null)}/></label><button className="property-confirm" disabled={!renameGraphRequest.name.trim()}>完成</button></form></div>}
