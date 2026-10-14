@@ -10,6 +10,7 @@ import { balancedPosition, nearbyIntentPosition, relaxLayout } from './layout'
 import { copyNodeSelection, pasteNodeSelection, type NodeClipboard } from './nodeClipboard'
 import { pointInPolygon, segmentHitsBox, segmentHitsPolygon } from './selectionGeometry'
 import { parseSearchTerms } from './searchTerms'
+import { SceneRenameInput } from './SceneRenameInput'
 import { isImeComposing, matchesShortcut, shortcutForEvent, shouldRemoveSelection } from './shortcuts'
 import { insertTabAtSelection, parseMarkdownBlocks } from './textEditing'
 import { CURRENT_SCHEMA_VERSION, parseWorkspaceDocument, portableWorkspaceJson, prepareImportedWorkspaceJson, resolveImageAsset, StorageConflictError, storeImageAsset, workspaceAutoSaveDelay, workspaceStorage, workspaceStorageLabel } from './storage'
@@ -523,11 +524,7 @@ function Word({ node, degree, mergeCount, selected, hovered, linking, editing, m
   const size = .5 + Math.min(degree, 5) * .055
   const textRef = useRef<any>(null)
   const groupRef = useRef<any>(null)
-  const [renameDraft, setRenameDraft] = useState(node.label)
-  const renameInputRef = useRef<HTMLInputElement>(null)
-  const renameComposing = useRef(false)
   const emergenceStarted = useRef(0)
-  useEffect(() => { if (editing) setRenameDraft(node.label) }, [editing, node.label])
   useEffect(() => { if (playbackFocused) emergenceStarted.current = performance.now() }, [playbackFocused])
   useEffect(() => {
     if (motionEnabled || playbackFocused || !groupRef.current) return
@@ -574,15 +571,7 @@ function Word({ node, degree, mergeCount, selected, hovered, linking, editing, m
       {node.hasChildGraph && <mesh position={[0, -.43, .03]}><circleGeometry args={[.035, 24]} /><meshBasicMaterial color={selected ? (dark ? '#dfca7a' : '#907323') : (dark ? '#aeb2b8' : '#60646a')} transparent opacity={hovered || selected ? .72 : .42} depthWrite={false} /></mesh>}
       {mergeCount > 1 && <Text position={[.42, .24, .07]} fontSize={.11} color={dark ? '#aeb2b8' : '#686c72'} anchorX="center" anchorY="middle" material-fog={false}>×{mergeCount}</Text>}
       {!editing && <Text key={fontStyle} ref={textRef} font={fontStyle === 'serif' ? '/fonts/NotoSerifSC-Medium.ttf' : '/fonts/NotoSansSC-Medium.ttf'} position={[0, 0, .06]} fontSize={(node.label.length > 4 ? .24 : .31) * fontScale * (fontStyle === 'serif' ? 1.04 : fontStyle === 'compact' ? .97 : 1)} color={node.isContextRoot ? (dark ? '#858b93' : '#92959a') : selected ? (dark ? '#eadfae' : '#66521d') : (dark ? '#f1f2f3' : '#050608')} anchorX="center" anchorY="middle" fontWeight={fontStyle === 'serif' ? 500 : fontStyle === 'compact' ? 680 : selected || hovered ? 700 : 500} letterSpacing={fontStyle === 'serif' ? .035 : fontStyle === 'compact' ? -.035 : 0} material-fog={false} material-depthTest={false} material-depthWrite={false}>{node.label}</Text>}
-      {editing && <Html center position={[0, 0, .12]} zIndexRange={[20, 10]}><input ref={renameInputRef} className="scene-rename" autoFocus value={renameDraft}
-        onCompositionStart={() => { renameComposing.current = true }}
-        onCompositionEnd={event => { renameComposing.current = false; setRenameDraft(event.currentTarget.value) }}
-        onChange={event => setRenameDraft(event.currentTarget.value)}
-        onFocus={event => event.currentTarget.select()}
-        onPointerDown={event => event.stopPropagation()}
-        onDoubleClick={event => event.stopPropagation()}
-        onKeyDown={event => { event.stopPropagation(); if (renameComposing.current || isImeComposing(event.nativeEvent)) return; if (event.key === 'Enter') onRename(event.currentTarget.value); if (event.key === 'Escape') onRename(null) }}
-        onBlur={event => onRename(event.currentTarget.value)} /></Html>}
+      {editing && <Html center position={[0, 0, .12]} zIndexRange={[20, 10]}><SceneRenameInput label={node.label} onRename={onRename}/></Html>}
     </group>
   </Billboard>
 }
